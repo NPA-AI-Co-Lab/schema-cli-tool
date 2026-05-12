@@ -41,6 +41,8 @@ export interface AppConfig {
   resumeMode?: 'auto' | 'fresh' | 'resume';
   /** If true, allow edited files to forcefully remove previously ingested records and re-ingest */
   forceReingestion?: boolean;
+  /** LLM sampling temperature (0–2). Defaults to 0 for deterministic extraction. */
+  temperature?: number;
 }
 
 /**

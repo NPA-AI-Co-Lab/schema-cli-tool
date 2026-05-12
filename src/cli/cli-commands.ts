@@ -1,5 +1,6 @@
 import { analyzeDataWithDb } from '../analysis/pipeline-db.js';
 import {
+  AppConfig,
   bold,
   getAppParams,
   getAppParamsFromConfig,
@@ -8,7 +9,6 @@ import {
   restoreCliSigintHandler,
 } from '../utils/index.js';
 import { deriveDatabasePath } from '../database/index.js';
-import { AppConfig } from '../utils/index.js';
 import { CliOptions, PackageInfo } from './cli-types.js';
 import { shouldUseInteractiveMode, validateOptions } from './cli-config.js';
 
@@ -98,11 +98,19 @@ async function runInteractiveMode(options: CliOptions, pkg: PackageInfo) {
   removeCliSigintHandler();
 
   try {
-    await analyzeDataWithDb(appParams, undefined, quiet);
+    const summary = await analyzeDataWithDb(appParams, undefined, quiet);
 
     if (!quiet) {
-      console.error(`✅ Analysis completed! Results saved to: ${appParams.outputPath}`);
+      if (summary.warningCount > 0) {
+        console.error(
+          `Results saved to: ${appParams.outputPath}. Warning count: ${summary.warningCount}`
+        );
+      } else {
+        console.error(`✅ Analysis completed! Results saved to: ${appParams.outputPath}`);
+      }
     }
+
+    process.exitCode = summary.warningCount > 0 ? 2 : 0;
   } catch (error) {
     restoreCliSigintHandler();
     throw error;
@@ -183,11 +191,19 @@ async function runCliMode(options: CliOptions, pkg: PackageInfo) {
   removeCliSigintHandler();
 
   try {
-    await analyzeDataWithDb(appParams, undefined, quiet);
+    const summary = await analyzeDataWithDb(appParams, undefined, quiet);
 
     if (!quiet && outputToFile) {
-      console.error(`✅ Analysis completed! Results saved to: ${appParams.outputPath}`);
+      if (summary.warningCount > 0) {
+        console.error(
+          `Results saved to: ${appParams.outputPath}. Warning count: ${summary.warningCount}`
+        );
+      } else {
+        console.error(`✅ Analysis completed! Results saved to: ${appParams.outputPath}`);
+      }
     }
+
+    process.exitCode = summary.warningCount > 0 ? 2 : 0;
   } catch (error) {
     restoreCliSigintHandler();
     throw error;

@@ -3,9 +3,8 @@
  */
 
 import path from 'path';
-import { existsSync } from 'fs';
+import fs, { existsSync } from 'fs';
 import crypto from 'crypto';
-import fs from 'fs';
 import { AppConfig } from './types.js';
 import { deriveDatabasePath } from '../database/index.js';
 
@@ -108,6 +107,11 @@ export function validateConfig(config: AppConfig): void {
   // Validate resume mode
   if (config.resumeMode && !['auto', 'fresh', 'resume'].includes(config.resumeMode)) {
     errors.push('resumeMode must be one of: auto, fresh, resume');
+  }
+
+  // Validate temperature
+  if (config.temperature !== undefined && (config.temperature < 0 || config.temperature > 2)) {
+    errors.push(`temperature must be between 0 and 2, got ${config.temperature}`);
   }
 
   if (errors.length > 0) {

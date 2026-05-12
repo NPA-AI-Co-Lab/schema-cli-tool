@@ -9,25 +9,25 @@ import ora, { Ora } from 'ora';
 import { convertJsonSchemaToZod } from 'zod-from-json-schema';
 import { resolveRefs } from 'json-refs';
 import pLimit from 'p-limit';
-import { ZodTypeAny } from 'zod';
+import { ZodError, ZodTypeAny } from 'zod';
 
 import { ILLMClient } from '../interfaces/llm-client.interface.js';
 import { LLMClientFactory } from '../clients/llm-client-factory.js';
 import {
-  loadInstructions,
-  fixZodFromJsonSchema,
-  loadJSON,
-  runWithRetries,
   basePath,
-  normalizeConfig,
-  validateConfig,
-  getFilePaths,
   createConfigHash,
+  fixZodFromJsonSchema,
+  getFilePaths,
+  loadInstructions,
+  loadJSON,
+  normalizeConfig,
+  runWithRetries,
+  validateConfig,
 } from '../utils/index.js';
 import {
-  getLLMSchema,
-  createJsonLDWriter,
   createAppendingJsonLDWriter,
+  createJsonLDWriter,
+  getLLMSchema,
   JsonLdSchema,
 } from '../jsonld/index.js';
 import { createLogger } from '../logging.js';
@@ -35,18 +35,113 @@ import { createPIIHandlers } from '../pii_handling/pii_handling.js';
 import type { RecordData } from '../pii_handling/types.js';
 import { processBatch } from './processor.js';
 import { buildPartialSchema } from './rules/partial-schema.js';
+import type { DeterministicFieldResult, LoadedRules } from './rules/index.js';
 import { loadRulesConfig, transformRow } from './rules/index.js';
 import { DbStreamingProcessor } from './db-streaming-processor.js';
 import { FileIngestionManager } from './file-ingestion.js';
-import type { DeterministicFieldResult, LoadedRules } from './rules/index.js';
 import { DatabaseManager, deriveDatabasePath } from '../database/index.js';
 import type { AppConfig } from '../utils/types.js';
+import { setActiveSpinner } from '../utils/ui.js';
+import type { ValidationErrorDetails } from '../jsonld/types.js';
 
 type JsonSchema = Record<string, unknown>;
 type DbMode = 'fresh' | 'resume';
 type OutputMode = 'rewrite' | 'append';
+type PackageManifest = { name?: string; version?: string };
+export type AnalysisRunSummary = { warningCount: number };
+type RowWarningContext = {
+  filePath: string;
+  fileCsvLine: number;
+  uuid: string;
+};
 
 const INSTRUCTION_PATH = path.resolve(basePath, 'static', 'instructions.txt');
+const PROVENANCE_CONTEXT = {
+  toolName: 'urn:npa-ingest-insight-cli:toolName',
+  configHash: 'urn:npa-ingest-insight-cli:configHash',
+  defaultModel: 'urn:npa-ingest-insight-cli:defaultModel',
+  fallbackModel: 'urn:npa-ingest-insight-cli:fallbackModel',
+  schemaPath: 'urn:npa-ingest-insight-cli:schemaPath',
+  rulesPath: 'urn:npa-ingest-insight-cli:rulesPath',
+  uuidColumn: 'urn:npa-ingest-insight-cli:uuidColumn',
+  sourceFiles: 'urn:npa-ingest-insight-cli:sourceFiles',
+  outputPath: 'urn:npa-ingest-insight-cli:outputPath',
+  databasePath: 'urn:npa-ingest-insight-cli:databasePath',
+  batchSize: 'urn:npa-ingest-insight-cli:batchSize',
+  concurrencySize: 'urn:npa-ingest-insight-cli:concurrencySize',
+  retriesNumber: 'urn:npa-ingest-insight-cli:retriesNumber',
+  enableLogging: 'urn:npa-ingest-insight-cli:enableLogging',
+  hidePII: 'urn:npa-ingest-insight-cli:hidePII',
+  requiredFieldErrorsFailBatch: 'urn:npa-ingest-insight-cli:requiredFieldErrorsFailBatch',
+  resumeMode: 'urn:npa-ingest-insight-cli:resumeMode',
+  forceReingestion: 'urn:npa-ingest-insight-cli:forceReingestion',
+  softwareVersion: 'https://schema.org/softwareVersion',
+  dateCreated: 'https://schema.org/dateCreated',
+};
+
+function attachWarningRowContext(
+  error: ValidationErrorDetails,
+  rowContextByCsvRowIndex: Map<number, RowWarningContext>
+): ValidationErrorDetails {
+  if (error.csvRowIndex === undefined) {
+    return error;
+  }
+
+  const rowContext = rowContextByCsvRowIndex.get(error.csvRowIndex);
+  if (!rowContext) {
+    return error;
+  }
+
+  return {
+    ...error,
+    filePath: rowContext.filePath,
+    fileCsvLine: rowContext.fileCsvLine,
+    uuid: rowContext.uuid,
+  };
+}
+
+function buildOutputProvenanceEntry(
+  rawJsonLdSchema: JsonLdSchema,
+  normalizedConfig: AppConfig,
+  filePaths: string[],
+  configHash: string,
+  dbPath: string
+): Record<string, unknown> {
+  const packageManifest = loadJSON<PackageManifest>(path.resolve(basePath, 'package.json'));
+  const toolName = packageManifest.name || 'npa-ingest-insight-cli';
+  const toolVersion = packageManifest.version || 'unknown';
+  const generatedAt = new Date().toISOString();
+
+  return {
+    '@context': {
+      ...rawJsonLdSchema['@context'],
+      ...PROVENANCE_CONTEXT,
+    },
+    '@id': `urn:npa-ingest-insight-cli:output-metadata:${configHash}`,
+    '@type': 'Dataset',
+    name: `${toolName} output metadata`,
+    toolName,
+    softwareVersion: toolVersion,
+    dateCreated: generatedAt,
+    configHash,
+    defaultModel: normalizedConfig.defaultModel,
+    fallbackModel: normalizedConfig.fallbackModel,
+    schemaPath: normalizedConfig.schemaPath,
+    rulesPath: normalizedConfig.rulesPath || null,
+    uuidColumn: normalizedConfig.uuidColumn || null,
+    sourceFiles: filePaths,
+    outputPath: normalizedConfig.outputPath || 'stdout',
+    databasePath: dbPath,
+    batchSize: normalizedConfig.batchSize,
+    concurrencySize: normalizedConfig.concurrencySize,
+    retriesNumber: normalizedConfig.retriesNumber,
+    enableLogging: normalizedConfig.enableLogging,
+    hidePII: normalizedConfig.hidePII,
+    requiredFieldErrorsFailBatch: normalizedConfig.requiredFieldErrorsFailBatch,
+    resumeMode: normalizedConfig.resumeMode || 'auto',
+    forceReingestion: Boolean(normalizedConfig.forceReingestion),
+  };
+}
 
 /**
  * Main database-backed analysis function for multi-file CSV processing
@@ -55,7 +150,7 @@ export async function analyzeDataWithDb(
   config: AppConfig,
   llmClient?: ILLMClient,
   quiet: boolean = false
-) {
+): Promise<AnalysisRunSummary> {
   // Normalize and validate configuration
   const normalizedConfig = normalizeConfig(config);
   validateConfig(normalizedConfig);
@@ -76,6 +171,7 @@ export async function analyzeDataWithDb(
     llmFieldOverrides,
     resumeMode,
     forceReingestion,
+    temperature,
   } = normalizedConfig;
 
   const filePaths = getFilePaths(normalizedConfig);
@@ -177,6 +273,13 @@ export async function analyzeDataWithDb(
     // Load schema and setup
     const schema = getLLMSchema(schemaPath);
     const rawJsonLdSchema = loadJSON<JsonLdSchema>(schemaPath);
+    const provenanceEntry = buildOutputProvenanceEntry(
+      rawJsonLdSchema,
+      normalizedConfig,
+      filePaths,
+      currentConfigHash,
+      dbPath
+    );
     const { resolved } = await resolveRefs(schema);
     const resolvedSchema = resolved as JsonSchema;
     const zodSchema = fixZodFromJsonSchema(resolvedSchema, convertJsonSchemaToZod(resolvedSchema));
@@ -190,6 +293,7 @@ export async function analyzeDataWithDb(
       logUuidGeneration,
       logRetryAttempt,
       logBatchOutcome,
+      getWarningCount,
     } = createLogger(enableLogging);
 
     const { encodePII, decodePII } = createPIIHandlers(enablePiiProcessing);
@@ -218,7 +322,7 @@ export async function analyzeDataWithDb(
 
     // Check if any file was re-ingested due to forceReingestion
     const anyReingested = ingestionResults.some((r) => r.reingested);
-    
+
     if (anyReingested) {
       if (!quiet) {
         console.log(
@@ -252,8 +356,8 @@ export async function analyzeDataWithDb(
       // Still need to finalize output
       const writerEarly =
         outputMode === 'append'
-          ? createAppendingJsonLDWriter(outputPath, schemaPath)
-          : createJsonLDWriter(outputPath, schemaPath);
+          ? createAppendingJsonLDWriter(outputPath, schemaPath, provenanceEntry)
+          : createJsonLDWriter(outputPath, schemaPath, provenanceEntry);
 
       const streamingProcessor = new DbStreamingProcessor(writerEarly, rawJsonLdSchema, schema, db);
       await streamingProcessor.restoreFromDatabase();
@@ -261,7 +365,7 @@ export async function analyzeDataWithDb(
 
       db.state.markProcessingCompleted();
       db.close();
-      return;
+      return { warningCount: getWarningCount() };
     }
 
     if (!quiet) {
@@ -270,8 +374,8 @@ export async function analyzeDataWithDb(
 
     const writer =
       outputMode === 'append'
-        ? createAppendingJsonLDWriter(outputPath, schemaPath)
-        : createJsonLDWriter(outputPath, schemaPath);
+        ? createAppendingJsonLDWriter(outputPath, schemaPath, provenanceEntry)
+        : createJsonLDWriter(outputPath, schemaPath, provenanceEntry);
 
     const streamingProcessor = new DbStreamingProcessor(writer, rawJsonLdSchema, schema, db);
 
@@ -296,6 +400,7 @@ export async function analyzeDataWithDb(
     if (!quiet) {
       spinner = ora('Processing batches...').start();
       spinner.color = 'yellow';
+      setActiveSpinner(spinner);
       stopSpinnerUpdate = setInterval(() => {
         const progress = db.state.getProcessingProgress();
         spinner.text = `Processing: ${progress.processed_rows}/${progress.total_rows} rows, ${progress.completed_uuids}/${progress.total_uuids} UUIDs completed`;
@@ -311,6 +416,7 @@ export async function analyzeDataWithDb(
       if (stopSpinnerUpdate) {
         clearInterval(stopSpinnerUpdate);
       }
+      setActiveSpinner(null);
 
       try {
         await streamingProcessor.finalize();
@@ -350,8 +456,29 @@ export async function analyzeDataWithDb(
           const csvLineStart = batchRows[0].global_row_index + 1;
           const csvLineEnd = batchRows[batchRows.length - 1].global_row_index + 1;
           const csvLineRange = `${csvLineStart}-${csvLineEnd}`;
+          const csvRowIndexes = batchRows.map((row) => row.global_row_index + 1);
+          const filePathById = new Map<number, string>();
+          const rowContextByCsvRowIndex = new Map<
+            number,
+            { filePath: string; fileCsvLine: number; uuid: string }
+          >();
 
           try {
+            for (const row of batchRows) {
+              let filePathForRow = filePathById.get(row.file_id);
+              if (!filePathForRow) {
+                filePathForRow =
+                  db.files.getFileById(row.file_id)?.file_path ?? `file_id=${row.file_id}`;
+                filePathById.set(row.file_id, filePathForRow);
+              }
+
+              rowContextByCsvRowIndex.set(row.global_row_index + 1, {
+                filePath: filePathForRow,
+                fileCsvLine: row.file_row_index + 2,
+                uuid: row.uuid,
+              });
+            }
+
             // Parse raw data for batch and restore userID from database
             const batchData: RecordData[] = batchRows.map((row) => {
               const data = JSON.parse(row.raw_data);
@@ -445,14 +572,33 @@ export async function analyzeDataWithDb(
               index: batchIndex,
               input,
               model: defaultModel,
-              logValidationError,
-              parseZodError,
+              logValidationError: async (error: any) => {
+                await logValidationError(attachWarningRowContext(error, rowContextByCsvRowIndex));
+              },
+              parseZodError: (
+                zodError: ZodError,
+                batchIndexParam: number,
+                csvLineStartParam: number,
+                csvLineEndParam: number,
+                originalData?: Record<string, unknown>
+              ) =>
+                parseZodError(
+                  zodError,
+                  batchIndexParam,
+                  csvLineStartParam,
+                  csvLineEndParam,
+                  originalData,
+                  undefined,
+                  csvRowIndexes
+                ).map((error) => attachWarningRowContext(error, rowContextByCsvRowIndex)),
               logRetryAttempt,
               csvLineStart: csvLineStart,
+              csvRowIndexes,
               decodePII,
               encodingMap,
               requiredFieldErrorsFailBatch,
               prefills: deterministicPrefills,
+              temperature,
             };
 
             // Process batch with retry logic and timing
@@ -514,26 +660,35 @@ export async function analyzeDataWithDb(
     if (stopSpinnerUpdate) {
       clearInterval(stopSpinnerUpdate);
     }
+    setActiveSpinner(null);
 
     // Finalize
     await streamingProcessor.finalize();
     await flushLogs();
 
     const finalProgress = db.state.getProcessingProgress();
+    const warningCount = getWarningCount();
 
     if (!quiet) {
-      spinner.succeed(
-        `Analysis complete! ${finalProgress.processed_rows} rows processed, ${finalProgress.completed_uuids} UUIDs completed`
-      );
+      if (warningCount > 0) {
+        spinner.warn(
+          `Analysis completed with warnings! ${finalProgress.processed_rows} rows processed, ${finalProgress.completed_uuids} UUIDs completed, ${warningCount} warning(s)`
+        );
+      } else {
+        spinner.succeed(
+          `Analysis complete! ${finalProgress.processed_rows} rows processed, ${finalProgress.completed_uuids} UUIDs completed`
+        );
+      }
       console.log(`📝 Output written to: ${outputPath}`);
     }
 
     // Mark as completed
     db.state.markProcessingCompleted();
+    return { warningCount };
   } catch (error) {
     throw error;
   } finally {
+    setActiveSpinner(null);
     db.close();
   }
 }
-

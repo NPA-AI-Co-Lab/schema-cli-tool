@@ -1,9 +1,10 @@
 import { appendFile, mkdir, writeFile } from 'fs/promises';
 import path from 'path';
-import { loadGlobalConfig, basePath, getCurrentAttemptNumber } from './utils/index.js';
+import { basePath, getCurrentAttemptNumber, loadGlobalConfig } from './utils/index.js';
 import pLimit from 'p-limit';
 import { ZodError } from 'zod';
 import { ValidationErrorDetails } from './jsonld/index.js';
+import { writeStderrLine } from './utils/ui.js';
 
 const LOG_DIR = path.join(basePath, 'logging');
 const VALIDATION_LOG_DIR = path.join(LOG_DIR, 'validation_errors');
@@ -75,10 +76,30 @@ function getMeaningfulFieldPath(fieldPath: string): string {
   return fieldPath;
 }
 
+function emitValidationWarning(errorDetails: ValidationErrorDetails) {
+  const meaningfulPath = getMeaningfulFieldPath(errorDetails.fieldPath);
+  const attemptNumber =
+    errorDetails.attemptNumber || getCurrentAttemptNumber(errorDetails.batchIndex);
+  const location =
+    errorDetails.filePath && errorDetails.fileCsvLine !== undefined
+      ? `file ${errorDetails.filePath}, line ${errorDetails.fileCsvLine}`
+      : errorDetails.csvRowIndex !== undefined
+        ? `line ${errorDetails.csvRowIndex}`
+        : `lines ${errorDetails.csvLineStart}-${errorDetails.csvLineEnd}`;
+  const attemptSuffix = attemptNumber ? `, attempt ${attemptNumber}` : '';
+  const uuidSuffix = errorDetails.uuid ? `, uuid ${errorDetails.uuid}` : '';
+
+  writeStderrLine(
+    `WARNING: ${location}${uuidSuffix}, batch ${errorDetails.batchIndex}${attemptSuffix}, field ${meaningfulPath}: ${errorDetails.errorMessage}`
+  );
+}
+
 function logValidationError(errorDetails: ValidationErrorDetails) {
   const meaningfulPath = getMeaningfulFieldPath(errorDetails.fieldPath);
   const attemptNumber =
     errorDetails.attemptNumber || getCurrentAttemptNumber(errorDetails.batchIndex);
+
+  emitValidationWarning(errorDetails);
 
   const readableLogEntry = {
     timestamp: new Date().toISOString(),
@@ -88,6 +109,9 @@ function logValidationError(errorDetails: ValidationErrorDetails) {
       csvLineRange: `${errorDetails.csvLineStart}-${errorDetails.csvLineEnd}`,
       specificCsvLine: errorDetails.csvRowIndex,
       ...(attemptNumber && { attemptNumber }),
+      filePath: errorDetails.filePath,
+      fileCsvLine: errorDetails.fileCsvLine,
+      uuid: errorDetails.uuid,
     },
     field_details: {
       expectedType: errorDetails.expectedType,
@@ -105,7 +129,9 @@ function parseZodError(
   batchIndex: number,
   csvLineStart: number,
   csvLineEnd: number,
-  originalData?: AnalysisResult
+  originalData?: AnalysisResult,
+  _originalBatch?: Record<string, string>[],
+  csvRowIndexes?: number[]
 ): ValidationErrorDetails[] {
   const errors: ValidationErrorDetails[] = [];
   const attemptNumber = getCurrentAttemptNumber(batchIndex);
@@ -118,7 +144,7 @@ function parseZodError(
       issue.path.length >= 2 && issue.path[0] === 'results' && typeof issue.path[1] === 'number';
     if (canGetRowIndex) {
       const resultIndex = issue.path[1] as number;
-      csvRowIndex = csvLineStart + resultIndex;
+      csvRowIndex = csvRowIndexes?.[resultIndex] ?? csvLineStart + resultIndex;
     }
 
     errors.push({
@@ -224,7 +250,7 @@ export interface UuidGenerationDetails {
     | 'generated'
     | 'cached'
     | 'fallback_to_email'
-    | 'fallback_to_random'
+    | 'fallback_to_row_digest'
     | 'column_missing'
     | 'column_empty';
   inputValues: string[];
@@ -263,23 +289,41 @@ async function flushLogs() {
 }
 
 export function createLogger(enableLogging: boolean) {
+  let warningCount = 0;
+
+  const countedLogValidationError = async (
+    errorDetails: ValidationErrorDetails,
+    persistToFile: boolean
+  ) => {
+    warningCount++;
+    if (persistToFile) {
+      await logValidationError(errorDetails);
+    } else {
+      emitValidationWarning(errorDetails);
+    }
+  };
+
   return enableLogging
     ? {
         log,
-        logValidationError,
+        logValidationError: async (errorDetails: ValidationErrorDetails) =>
+          countedLogValidationError(errorDetails, true),
         parseZodError,
         logUuidGeneration,
         logRetryAttempt,
         logBatchOutcome,
         flushLogs,
+        getWarningCount: () => warningCount,
       }
     : {
         log: async () => {},
-        logValidationError: async () => {},
+        logValidationError: async (errorDetails: ValidationErrorDetails) =>
+          countedLogValidationError(errorDetails, false),
         parseZodError: () => [],
         logUuidGeneration: async () => {},
         logRetryAttempt: async () => {},
         logBatchOutcome: async () => {},
         flushLogs: async () => {},
+        getWarningCount: () => warningCount,
       };
 }

@@ -68,6 +68,7 @@ describe('LLM Client', () => {
         model: 'gpt-4',
         instructions: 'Extract entities',
         input: [{ role: 'user', content: 'Test data' }],
+        temperature: 0,
         text: { format: { type: 'json_schema' } },
       });
     });

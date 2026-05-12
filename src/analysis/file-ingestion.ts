@@ -91,14 +91,14 @@ export class FileIngestionManager {
       let globalRowIndex = nextGlobalIndex;
 
       const rawRowsToInsert: InsertRawRow[] = [];
-      let randomUuidCountForFile = 0;
+      let digestFallbackCountForFile = 0;
       let duplicateRowCountForFile = 0;
 
       for await (const batch of loadData(filePath, this.batchSize, true)) {
         const assigned = assignUuidsToBatch(batch, this.uuidColumn, this.logUuidGeneration);
         const batchWithUuids = Array.isArray(assigned) ? assigned : assigned.batch;
-        const randomCount = Array.isArray(assigned) ? 0 : assigned.randomCount;
-        randomUuidCountForFile += randomCount;
+        const digestFallbackCount = Array.isArray(assigned) ? 0 : assigned.digestFallbackCount;
+        digestFallbackCountForFile += digestFallbackCount;
 
         for (const record of batchWithUuids) {
           const rawData = { ...record };
@@ -164,9 +164,9 @@ export class FileIngestionManager {
         );
       }
 
-      if (randomUuidCountForFile > 0) {
-        console.error(
-          `${randomUuidCountForFile} row(s) in file '${filePath}' had UUIDs generated at random (no valid UUID source found).`
+      if (digestFallbackCountForFile > 0) {
+        console.warn(
+          `${digestFallbackCountForFile} row(s) in file '${filePath}' had UUIDs derived from a row-content digest because no stable UUID source was found.`
         );
       }
 

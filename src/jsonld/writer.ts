@@ -2,51 +2,55 @@ import { createWriteStream, WriteStream } from 'fs';
 import { llmOutputToJsonLd } from './converter.js';
 import { JsonLDWriter } from './types.js';
 
+function serializeEntry(entry: Record<string, unknown>): string {
+  return JSON.stringify(entry, null, 2);
+}
+
 /**
  * Create a JSON-LD file writer that streams results to a file or stdout
  */
-export function createJsonLDWriter(outputPath: string, jsonLdSchemaPath: string): JsonLDWriter {
+export function createJsonLDWriter(
+  outputPath: string,
+  jsonLdSchemaPath: string,
+  provenanceEntry?: Record<string, unknown>
+): JsonLDWriter {
   let isFirst = true;
   const stream = outputPath ? createWriteStream(outputPath, { flags: 'w' }) : process.stdout;
+  const writeChunk =
+    stream === process.stdout
+      ? (data: string) => process.stdout.write(data)
+      : (data: string) => (stream as WriteStream).write(data);
 
-  if (stream !== process.stdout) {
-    (stream as WriteStream).write('[\n');
-  } else {
-    process.stdout.write('[\n');
+  writeChunk('[\n');
+
+  if (provenanceEntry) {
+    writeChunk(serializeEntry(provenanceEntry));
+    isFirst = false;
   }
 
   return {
     write: async (results: Record<string, unknown>[]) => {
-
       if (!Array.isArray(results) || results.length === 0) {
         return;
       }
-      
+
       for (const result of results) {
         const jsonLdResult = llmOutputToJsonLd(jsonLdSchemaPath, result);
         if (!isFirst) {
-          if (stream !== process.stdout) {
-            (stream as WriteStream).write(',\n');
-          } else {
-            process.stdout.write(',\n');
-          }
+          writeChunk(',\n');
         }
-        const output = JSON.stringify(jsonLdResult, null, 2);
-        if (stream !== process.stdout) {
-          (stream as WriteStream).write(output);
-        } else {
-          process.stdout.write(output);
-        }
+        const output = serializeEntry(jsonLdResult);
+        writeChunk(output);
         isFirst = false;
       }
     },
     finalize: async () => {
       return new Promise<void>((resolve) => {
         if (stream !== process.stdout) {
-          (stream as WriteStream).write('\n]\n');
+          writeChunk('\n]\n');
           (stream as WriteStream).end(() => resolve());
         } else {
-          process.stdout.write('\n]\n');
+          writeChunk('\n]\n');
           resolve();
         }
       });
@@ -59,10 +63,54 @@ export function createJsonLDWriter(outputPath: string, jsonLdSchemaPath: string)
  */
 export function createAppendingJsonLDWriter(
   outputPath: string,
-  jsonLdSchemaPath: string
+  jsonLdSchemaPath: string,
+  provenanceEntry?: Record<string, unknown>
 ): JsonLDWriter {
   if (!outputPath) {
-    return createJsonLDWriter(outputPath, jsonLdSchemaPath);
+    return createJsonLDWriter(outputPath, jsonLdSchemaPath, provenanceEntry);
+  }
+
+  const provenanceOutput = provenanceEntry ? serializeEntry(provenanceEntry) : null;
+  const provenanceId =
+    provenanceEntry && typeof provenanceEntry['@id'] === 'string' ? provenanceEntry['@id'] : null;
+  let provenanceEnsured = false;
+
+  async function ensureProvenanceEntry() {
+    if (provenanceEnsured || !provenanceOutput || !provenanceId) {
+      provenanceEnsured = true;
+      return;
+    }
+
+    const fs = await import('fs/promises');
+    let existingContent = '';
+
+    try {
+      existingContent = await fs.readFile(outputPath, 'utf-8');
+    } catch (error) {
+      const readError = error as NodeJS.ErrnoException;
+      if (readError.code !== 'ENOENT') {
+        throw error;
+      }
+    }
+
+    if (existingContent.includes(`"${provenanceId}"`)) {
+      provenanceEnsured = true;
+      return;
+    }
+
+    const trimmedContent = existingContent.trim();
+    const isEmptyArray = /^\[\s*\]$/.test(trimmedContent);
+    const innerContent =
+      trimmedContent.length === 0 || isEmptyArray
+        ? ''
+        : trimmedContent.replace(/^\[\s*/, '').replace(/\s*\]\s*$/, '');
+
+    const updatedContent = innerContent
+      ? '[\n' + provenanceOutput + ',\n' + innerContent + '\n]'
+      : '[\n' + provenanceOutput + '\n]';
+
+    await fs.writeFile(outputPath, updatedContent);
+    provenanceEnsured = true;
   }
 
   // For resuming, we don't overwrite the file - we create a no-op writer
@@ -75,6 +123,7 @@ export function createAppendingJsonLDWriter(
         // If we get here, it means new UUIDs were completed during resume
         // We need to append them to the existing file properly
         const fs = await import('fs/promises');
+        await ensureProvenanceEntry();
 
         try {
           // Read existing file to check if it has content
@@ -86,7 +135,7 @@ export function createAppendingJsonLDWriter(
           // Prepare new entries
           const newEntries = results.map((result) => {
             const jsonLdResult = llmOutputToJsonLd(jsonLdSchemaPath, result);
-            return JSON.stringify(jsonLdResult, null, 2);
+            return serializeEntry(jsonLdResult);
           });
 
           if (hasExistingContent) {
@@ -106,7 +155,7 @@ export function createAppendingJsonLDWriter(
       }
     },
     finalize: async () => {
-      // No need to finalize when appending - file should already be properly closed
+      await ensureProvenanceEntry();
     },
   };
 }

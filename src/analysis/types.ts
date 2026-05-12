@@ -1,4 +1,4 @@
-import { ZodTypeAny, ZodError } from 'zod';
+import { ZodError, ZodTypeAny } from 'zod';
 import { ValidationErrorDetails } from '../jsonld/types.js';
 
 /**
@@ -23,7 +23,8 @@ export interface ValidateResultsArgs {
     csvLineStart: number,
     csvLineEnd: number,
     originalData?: AnalysisResult,
-    originalBatch?: Record<string, string>[]
+    originalBatch?: Record<string, string>[],
+    csvRowIndexes?: number[]
   ) => ValidationErrorDetails[];
 
   /** Index of the current batch being processed */
@@ -34,6 +35,9 @@ export interface ValidateResultsArgs {
 
   /** Number of records in the current batch */
   batchLength: number;
+
+  /** Optional explicit CSV row indexes for each result in the current batch */
+  csvRowIndexes?: number[];
 
   /** Whether required field validation errors should fail the batch */
   requiredFieldErrorsFailBatch?: boolean;
@@ -81,7 +85,8 @@ export interface ValidateZodSchemaArgs {
     csvLineStart: number,
     csvLineEnd: number,
     originalData?: AnalysisResult,
-    originalBatch?: Record<string, string>[]
+    originalBatch?: Record<string, string>[],
+    csvRowIndexes?: number[]
   ) => ValidationErrorDetails[];
 
   /** Index of the current batch being processed */
@@ -95,4 +100,7 @@ export interface ValidateZodSchemaArgs {
 
   /** Optional original batch data for error context */
   originalBatch?: Record<string, string>[];
+
+  /** Optional explicit CSV row indexes for each result in the current batch */
+  csvRowIndexes?: number[];
 }

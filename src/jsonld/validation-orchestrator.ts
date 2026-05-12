@@ -10,13 +10,15 @@ export async function validateRequiredFields(
   batchIndex: number,
   csvLineStart: number,
   logValidationError: (error: ValidationErrorDetails) => Promise<void>,
-  shouldFailBatch: boolean = false
+  shouldFailBatch: boolean = false,
+  csvRowIndexes?: number[]
 ): Promise<void> {
   const errorCount = await countRequiredFieldErrors(
     results,
     batchIndex,
     csvLineStart,
-    logValidationError
+    logValidationError,
+    csvRowIndexes
   );
 
   if (shouldFailBatch && errorCount > 0) {
@@ -31,16 +33,18 @@ async function countRequiredFieldErrors(
   results: Record<string, unknown>[],
   batchIndex: number,
   csvLineStart: number,
-  logValidationError: (error: ValidationErrorDetails) => Promise<void>
+  logValidationError: (error: ValidationErrorDetails) => Promise<void>,
+  csvRowIndexes?: number[]
 ): Promise<number> {
   let totalErrors = 0;
 
   for (let i = 0; i < results.length; i++) {
     const result = results[i];
+    const csvRowIndex = csvRowIndexes?.[i] ?? csvLineStart + i;
     const errorsInResult = await validateSingleResult(
       result,
       batchIndex,
-      csvLineStart + i,
+      csvRowIndex,
       logValidationError
     );
     totalErrors += errorsInResult;

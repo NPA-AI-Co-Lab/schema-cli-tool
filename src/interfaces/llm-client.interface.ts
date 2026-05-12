@@ -23,6 +23,9 @@ export interface LLMAnalysisRequest {
 
   /** Zod schema for response validation */
   zodSchema: ZodTypeAny;
+
+  /** Sampling temperature (0–2). Defaults to 0 when omitted. */
+  temperature?: number;
 }
 
 /**

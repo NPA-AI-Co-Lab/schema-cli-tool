@@ -22,7 +22,10 @@ You can customize the LLM settings in your `config.json`:
 
 - **defaultModel**: Primary model to use (e.g., "gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo")
 - **fallbackModel**: Backup model when primary fails
-- **uuidColumn**: Column name for UUID generation (defaults to email fields)
+- **temperature**: LLM sampling temperature from `0` to `2`; it now defaults to `0` to keep extraction results more
+  stable and reproducible, while still remaining configurable when needed
+- **uuidColumn**: Column name for UUID generation; if it is missing or empty, the CLI falls back to email fields, and if
+  no valid key is available it generates a deterministic v5 UUID from a hash of the row
 - **batchSize**: Number of records per API request (1-50)
 - **concurrencySize**: Concurrent API requests (1-20)
 
@@ -92,6 +95,7 @@ Create a configuration file (`config.json`) with your data and schema paths:
   "concurrencySize": 5,
   "defaultModel": "gpt-4o-mini",
   "fallbackModel": "gpt-4o",
+  "temperature": 0,
   "uuidColumn": "primaryEmail",
     "rulesPath": "./config/sample_comments.rules.json",
     "forceReingestion": false
@@ -112,14 +116,20 @@ Create a configuration file (`config.json`) with your data and schema paths:
 - **concurrencySize** - Maximum number of asynchronous prompts that can run at once;
 - **defaultModel** - The model that will analyze the data by default (it is possible to change LLM versions as you like);
 - **fallbackModel** - The model that will handle analysis when the default model fails;
-- **uuidColumn** - The column name to use for UUID generation. If not specified, defaults to email fields (primaryEmail, email, etc.). This allows you to generate consistent UUIDs based on any unique identifier column in your data.
+- **temperature** - Optional LLM sampling temperature in range `0..2`; it now defaults to `0` to keep extraction
+  results more stable and reproducible, while still remaining configurable when needed;
+- **uuidColumn** - The column name to use for UUID generation. If it is missing or empty, the CLI falls back to email
+  fields (primaryEmail, email, etc.), and if no valid key is available it generates a deterministic v5 UUID from a hash
+  of the row so the same row keeps the same ID across reruns. For this row-digest fallback, changing a column name or
+  value changes the UUID, while changing the file name, schema, or rules does not.
 - **rulesPath** - Optional path to a deterministic mapping file. When provided, the CLI will map rows rule-first and only invoke the LLM for unresolved fields.
 
 ### Multi-File Processing
 
 The tool supports processing multiple CSV files in a single run. You can provide either a single `dataPath` (legacy single-file mode) or an array `dataPaths` to process multiple files together. When multiple files are provided the pipeline:
 
-- assigns a global, stable UUID per record (based on the configured `uuidColumn` or a default set of email fields),
+- assigns a global, stable UUID per record (based on the configured `uuidColumn`, a default set of email fields, or a
+  deterministic v5 UUID derived from the row when no key is available),
 - stores raw rows and intermediate results in a local SQLite database, and
 - merges records with the same UUID into a single JSON-LD output entity.
 
@@ -142,8 +152,16 @@ Example configuration (multi-file):
 Behavior notes:
 
 - Database persistence: the pipeline writes ingestion state, per-row LLM results, and merged output into an SQLite database. The `databasePath` can be provided in the config or is auto-derived from `outputPath`.
+- Output provenance: the JSON-LD output includes a metadata entry with the CLI name/version, generation timestamp,
+  config hash, model settings, source files, and key runtime options so each file can be traced back to the exact run
+  that produced it.
 - Resume and interruption: processing can be interrupted (Ctrl+C). On the next run the pipeline will resume from the last saved state when possible; intermediate results are not lost.
 - File tracking: files are tracked by content hash so identical files are skipped and each file's status is recorded.
+- Row-digest UUID rules: when the fallback UUID is used, it is derived only from the normalized row contents and column
+  names. Changing a column name or value changes the UUID, while changing the file name, schema, or rules does not.
+- Warning handling: validation warnings are written to both the log files and `stderr`, and include the source file,
+  original CSV line, and UUID when available so scripts can detect partial failures and trace the exact row even if
+  batch grouping changes between runs. The CLI exits with code `2` when warnings are present.
 
 Behavior for edited files and partial ingests:
 
@@ -184,6 +202,9 @@ Rules live in a separate JSON file so you can iterate on deterministic mappings 
 ```
 
 - `schema` is resolved relative to the rules file and must match the JSON-LD used at runtime.
+- Startup validation: when the rules file is loaded, the CLI validates it against the active schema. Rules for unknown
+  schema fields are skipped, schema mismatches are reported, fields with no deterministic or LLM coverage are surfaced
+  immediately, and the run fails fast if any required schema field has no rule or LLM coverage.
 - `llm.default` toggles whether the LLM is used by default. When set to `false`, only fields listed in `llm.fields` are delegated to the model (e.g. `"fields": ["person.intent", "object.summary"]`).
 - `fields` maps schema paths to CSV columns. Each rule can try multiple sources (`source` accepts an array), apply transforms, reference taxonomy enums, and define literal fallbacks.
 - When fields are delegated to the LLM, the CLI builds a minimal prompt/schema for just those paths and merges the model’s answers back into the deterministic record.

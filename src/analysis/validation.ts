@@ -1,5 +1,6 @@
 import { ValidationError } from '../utils/index.js';
 import { ValidateLengthArgs, ValidateZodSchemaArgs } from './types.js';
+
 /**
  * Validate that output has expected length
  */
@@ -36,8 +37,16 @@ export async function validateLength(args: ValidateLengthArgs): Promise<void> {
 export async function validateZodSchema(
   args: ValidateZodSchemaArgs & { failOnSchemaError?: boolean }
 ): Promise<Record<string, string>[]> {
-  const { output, zodSchema, logValidationError, parseZodError, index, csvLineStart, batchLength } =
-    args;
+  const {
+    output,
+    zodSchema,
+    logValidationError,
+    parseZodError,
+    index,
+    csvLineStart,
+    batchLength,
+    csvRowIndexes,
+  } = args;
 
   const check = zodSchema.safeParse(output);
   if (!check.success) {
@@ -45,7 +54,15 @@ export async function validateZodSchema(
 
     if (shouldLogValidationErrors) {
       const csvLineEnd = csvLineStart + batchLength - 1;
-      const validationErrors = parseZodError(check.error, index, csvLineStart, csvLineEnd, output);
+      const validationErrors = parseZodError(
+        check.error,
+        index,
+        csvLineStart,
+        csvLineEnd,
+        output,
+        undefined,
+        csvRowIndexes
+      );
       for (const error of validationErrors) {
         await logValidationError(error);
       }

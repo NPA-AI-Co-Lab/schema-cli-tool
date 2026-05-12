@@ -31,6 +31,7 @@ export class OpenAILLMClient implements ILLMClient {
         model: request.model,
         instructions: request.instructions,
         input: request.input,
+        temperature: request.temperature ?? 0,
         text: {
           format: zodTextFormat(request.zodSchema, 'entities'),
         },

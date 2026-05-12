@@ -1,13 +1,43 @@
 import { Ora } from 'ora';
 import { countRows } from './data-loader.js';
 
+let activeSpinner: Ora | null = null;
+let stderrWriteQueue: Promise<void> = Promise.resolve();
+
+export function setActiveSpinner(spinner: Ora | null) {
+  activeSpinner = spinner;
+}
+
+export function writeStderrLine(message: string, spinner?: Ora) {
+  const targetSpinner = spinner ?? activeSpinner;
+
+  stderrWriteQueue = stderrWriteQueue
+    .then(
+      () =>
+        new Promise<void>((resolve) => {
+          const wasSpinning = Boolean(targetSpinner?.isSpinning);
+          if (wasSpinning) {
+            targetSpinner?.stop();
+          }
+
+          process.stderr.write(`${message}\n`, () => {
+            if (wasSpinning) {
+              targetSpinner?.start();
+            }
+            resolve();
+          });
+        })
+    )
+    .catch(() => {
+      // Ignore queue failures so subsequent warnings can still be written.
+    });
+}
+
 /**
  * Display warning message with spinner
  */
 export function warn(msg: string, spinner: Ora) {
-  spinner.clear();
-  console.warn('⚠️ ', msg);
-  spinner.start();
+  writeStderrLine(`WARNING: ${msg}`, spinner);
 }
 
 /**

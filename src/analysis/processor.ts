@@ -1,12 +1,12 @@
 import { ILLMClient, LLMAnalysisRequest } from '../interfaces/llm-client.interface.js';
-import { ZodTypeAny, ZodError } from 'zod';
+import { ZodError, ZodTypeAny } from 'zod';
 import { ValidateResultsArgs } from './types.js';
-import { ValidationErrorDetails } from '../jsonld/index.js';
-import { validateLength, validateZodSchema } from './validation.js';
 import {
   validateRequiredFields,
+  ValidationErrorDetails,
   ValidationErrorDetails as JsonLdValidationErrorDetails,
 } from '../jsonld/index.js';
+import { validateLength, validateZodSchema } from './validation.js';
 import { DeterministicFieldResult } from './rules/types.js';
 import { RetryAttemptDetails } from '../logging.js';
 
@@ -39,7 +39,9 @@ export interface ProcessBatchArgs {
     batchIndex: number,
     csvLineStart: number,
     csvLineEnd: number,
-    originalData?: Record<string, unknown>
+    originalData?: Record<string, unknown>,
+    originalBatch?: Record<string, string>[],
+    csvRowIndexes?: number[]
   ) => ValidationErrorDetails[];
   logRetryAttempt?: (details: RetryAttemptDetails) => Promise<void>;
   csvLineStart: number;
@@ -50,6 +52,8 @@ export interface ProcessBatchArgs {
   encodingMap: EncodingMap;
   requiredFieldErrorsFailBatch?: boolean;
   prefills?: DeterministicFieldResult[];
+  temperature?: number;
+  csvRowIndexes?: number[];
 }
 
 /**
@@ -148,7 +152,8 @@ export async function fetchAnalysis(
   instructions: string,
   input: Array<{ role: 'user' | 'system' | 'assistant'; content: string }>,
   model: string,
-  zodSchema: ZodTypeAny
+  zodSchema: ZodTypeAny,
+  temperature?: number
 ): Promise<Record<string, unknown>> {
   const request: LLMAnalysisRequest = {
     instructions,
@@ -158,6 +163,7 @@ export async function fetchAnalysis(
     })),
     model,
     zodSchema,
+    temperature,
   };
 
   const response = await llmClient.analyze(request);
@@ -187,6 +193,7 @@ export async function validateResults(
     csvLineStart,
     batchLength,
     requiredFieldErrorsFailBatch = false,
+    csvRowIndexes,
   } = args;
 
   await validateLength({
@@ -209,7 +216,8 @@ export async function validateResults(
       index,
       csvLineStart,
       adaptedLogValidationError,
-      requiredFieldErrorsFailBatch
+      requiredFieldErrorsFailBatch,
+      csvRowIndexes
     );
   }
 
@@ -221,6 +229,7 @@ export async function validateResults(
     index,
     csvLineStart,
     batchLength,
+    csvRowIndexes,
   });
 
   return validatedResults;
@@ -245,6 +254,8 @@ export async function processBatch(args: ProcessBatchArgs): Promise<Record<strin
     encodingMap,
     requiredFieldErrorsFailBatch,
     prefills,
+    temperature,
+    csvRowIndexes,
   } = args;
 
   const useDeterministicOnly = canSkipLLM(prefills, batchLength);
@@ -257,7 +268,7 @@ export async function processBatch(args: ProcessBatchArgs): Promise<Record<strin
     if (!llmClient) {
       throw new Error('LLM client is not configured');
     }
-    rawOutput = await fetchAnalysis(llmClient, instructions, input, model, zodSchema);
+    rawOutput = await fetchAnalysis(llmClient, instructions, input, model, zodSchema, temperature);
   }
 
   // Decode PII if needed
@@ -282,6 +293,7 @@ export async function processBatch(args: ProcessBatchArgs): Promise<Record<strin
     index,
     csvLineStart,
     batchLength,
+    csvRowIndexes,
     requiredFieldErrorsFailBatch,
     failOnSchemaError: !!requiredFieldErrorsFailBatch,
   };

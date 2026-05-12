@@ -1,4 +1,5 @@
-import { v5 as uuidv5, v4 as uuidv4 } from 'uuid';
+import { createHash } from 'node:crypto';
+import { v5 as uuidv5 } from 'uuid';
 import { splitValues, checkNotEmpty, checkPropertyExists } from './utils/index.js';
 import type { UuidGenerationDetails } from './logging.js';
 
@@ -27,7 +28,7 @@ type Person = {
 
 type UuidResult = {
   uuid: string;
-  isRandom: boolean;
+  usedDigestFallback: boolean;
 };
 
 function validateValue(value: string): boolean {
@@ -36,6 +37,43 @@ function validateValue(value: string): boolean {
 
 function validateEmail(email: string): boolean {
   return typeof email === 'string' && email.trim().length > 0;
+}
+
+function canonicalizeRowValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => canonicalizeRowValue(item));
+  }
+
+  if (typeof value === 'object' && value !== null) {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entryValue]) => entryValue !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entryValue]) => [key, canonicalizeRowValue(entryValue)]);
+
+    return Object.fromEntries(entries);
+  }
+
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+
+  return value;
+}
+
+function getDigestFallbackSource(person: RecordData): string {
+  const digestSource = Object.fromEntries(
+    Object.entries(person)
+      .filter(([key, value]) => key !== 'userID' && value !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, value]) => [key, canonicalizeRowValue(value)])
+  );
+
+  return JSON.stringify(digestSource);
+}
+
+function getUuidFromRowDigest(person: RecordData): string {
+  const digest = createHash('sha256').update(getDigestFallbackSource(person)).digest('hex');
+  return uuidv5(digest, NAMESPACE);
 }
 
 export function extractEmails(person: RecordData): string[] {
@@ -110,28 +148,28 @@ export function getUuidForPerson(
         generatedUuid: uuid,
       });
     }
-    return { uuid, isRandom: false };
+    return { uuid, usedDigestFallback: false };
   }
 
-  const uuid = uuidv4();
+  const uuid = getUuidFromRowDigest(person);
   if (logUuidGeneration) {
     logUuidGeneration({
-      eventType: 'fallback_to_random',
+      eventType: 'fallback_to_row_digest',
       uuidColumn,
       inputValues: [],
       generatedUuid: uuid,
-      fallbackReason: `No valid UUID values found (no email or ${uuidColumn ? `'${uuidColumn}' column` : 'email columns'}), generating random UUID`,
+      fallbackReason: `No valid UUID values found (no email or ${uuidColumn ? `'${uuidColumn}' column` : 'email columns'}), generating deterministic UUID from row digest`,
     });
   }
-  return { uuid, isRandom: true };
+  return { uuid, usedDigestFallback: true };
 }
 
 export function assignUuidsToBatch(
   batch: RecordData[],
   uuidColumn?: string,
   logUuidGeneration?: (details: UuidGenerationDetails) => Promise<void>
-): { batch: RecordData[]; randomCount: number } {
-  let randomCount = 0;
+): { batch: RecordData[]; digestFallbackCount: number } {
+  let digestFallbackCount = 0;
   const mapped = batch.map((row) => {
     if (!row) return row;
     const values = extractUuidValues(row, uuidColumn, logUuidGeneration);
@@ -155,7 +193,7 @@ export function assignUuidsToBatch(
     if (!assignedUuid) {
       const res = getUuidForPerson(row, uuidColumn, logUuidGeneration);
       assignedUuid = res.uuid;
-      if (res.isRandom) randomCount++;
+      if (res.usedDigestFallback) digestFallbackCount++;
     }
     for (const value of values) {
       VALUE_TO_UUID.set(value, assignedUuid);
@@ -164,7 +202,7 @@ export function assignUuidsToBatch(
     return row;
   });
 
-  return { batch: mapped, randomCount };
+  return { batch: mapped, digestFallbackCount };
 }
 
 function getUuidRecordMap(allResults: AnalysisResult[]): Map<string, Person[]> {

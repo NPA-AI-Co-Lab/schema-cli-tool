@@ -1,4 +1,4 @@
-import { readFileSync, createReadStream } from 'fs';
+import { createReadStream, readFileSync } from 'fs';
 import csv from 'csv-parser';
 import path from 'path';
 
@@ -62,7 +62,7 @@ export async function* loadData(
     });
     if (duplicates.length > 0 && checkHeaderDuplicates) {
       console.warn(
-        `⚠️  Warning: Duplicate column names detected in CSV header: ${duplicates.join(', ')}. Only the last occurrence of each will be used.`
+        `️⚠️ WARNING: Duplicate column names detected in CSV header: ${duplicates.join(', ')}. Only the last occurrence of each will be used.`
       );
     }
   });

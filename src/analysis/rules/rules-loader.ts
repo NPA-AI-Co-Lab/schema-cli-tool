@@ -198,6 +198,8 @@ export function loadRulesConfig({
   const llmFields = deriveInitialLlmFieldSet(config.llm, schemaFields);
   applyOverrides(llmFields, overrides, schemaFields);
 
+  validateRulesCoverage(schemaFields, fieldRules, llmFields, requiredFields);
+
   return {
     rulesPath: resolvedRulesPath,
     schemaPath: resolvedSchemaPath,
@@ -207,4 +209,55 @@ export function loadRulesConfig({
     requiredFields,
     schema,
   };
+}
+
+export function validateRulesCoverage(
+  schemaFields: SchemaFieldMeta[],
+  fieldRules: Map<string, NormalizedFieldRule>,
+  llmFields: Set<string>,
+  requiredFields: Set<string>
+): void {
+  const uncoveredOptional: string[] = [];
+  const uncoveredRequired: string[] = [];
+  const requiredCoveredOnlyByLlm: string[] = [];
+
+  for (const field of schemaFields) {
+    const hasDeterministicRule = fieldRules.has(field.path);
+    const coveredByLlm = llmFields.has(field.path);
+
+    if (hasDeterministicRule) {
+      continue;
+    }
+
+    if (requiredFields.has(field.path) && coveredByLlm) {
+      requiredCoveredOnlyByLlm.push(field.path);
+      continue;
+    }
+
+    if (!coveredByLlm) {
+      if (requiredFields.has(field.path)) {
+        uncoveredRequired.push(field.path);
+      } else {
+        uncoveredOptional.push(field.path);
+      }
+    }
+  }
+
+  if (requiredCoveredOnlyByLlm.length > 0) {
+    process.stderr.write(
+      `⚠️ Required schema fields are covered only by LLM (no deterministic rule):\n  ${requiredCoveredOnlyByLlm.join('\n  ')}\n`
+    );
+  }
+
+  if (uncoveredOptional.length > 0) {
+    process.stderr.write(
+      `⚠️ Optional schema fields are not covered by any deterministic rule or LLM:\n  ${uncoveredOptional.join('\n  ')}\n`
+    );
+  }
+
+  if (uncoveredRequired.length > 0) {
+    throw new Error(
+      `❌ Required schema fields have no rule or LLM coverage:\n  ${uncoveredRequired.join('\n  ')}`
+    );
+  }
 }

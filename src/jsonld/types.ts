@@ -67,6 +67,12 @@ export interface ValidationErrorDetails {
   actualValue: unknown;
   /** Specific CSV row index related to the error, if applicable */
   csvRowIndex?: number;
+  /** Original source file path for the row, if available */
+  filePath?: string;
+  /** 1-based CSV line number within the original source file, if available */
+  fileCsvLine?: number;
+  /** Stable UUID assigned to the source row, if available */
+  uuid?: string;
   /** Retry attempt number for this validation, if applicable (1-based) */
   attemptNumber?: number;
 }
