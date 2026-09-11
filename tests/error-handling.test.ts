@@ -44,7 +44,9 @@ describe('Error Handling', () => {
     it('should succeed on first attempt when no errors occur', async () => {
       const mockFn = vi.fn().mockResolvedValue({ success: true });
 
-      const result = await runWithRetries(mockFn, mockArgs, mockSpinner, 3);
+      const result = await runWithRetries(mockFn, mockArgs, mockSpinner, 3, {
+        fallbackModel: 'gpt-3.5-turbo',
+      });
 
       expect(result).toEqual({ success: true });
       expect(mockFn).toHaveBeenCalledTimes(1);
@@ -57,7 +59,9 @@ describe('Error Handling', () => {
         .mockRejectedValueOnce(new ValidationError('Schema validation failed'))
         .mockResolvedValueOnce({ success: true });
 
-      const result = await runWithRetries(mockFn, mockArgs, mockSpinner, 3);
+      const result = await runWithRetries(mockFn, mockArgs, mockSpinner, 3, {
+        fallbackModel: 'gpt-3.5-turbo',
+      });
 
       expect(result).toEqual({ success: true });
       expect(mockFn).toHaveBeenCalledTimes(2);
@@ -78,7 +82,9 @@ describe('Error Handling', () => {
         .mockRejectedValueOnce(rateLimitError)
         .mockResolvedValueOnce({ success: true });
 
-      const result = await runWithRetries(mockFn, mockArgs, mockSpinner, 3);
+      const result = await runWithRetries(mockFn, mockArgs, mockSpinner, 3, {
+        fallbackModel: 'gpt-3.5-turbo',
+      });
 
       expect(result).toEqual({ success: true });
       expect(mockFn).toHaveBeenCalledTimes(2);
@@ -98,7 +104,9 @@ describe('Error Handling', () => {
         .mockRejectedValueOnce(serverError)
         .mockResolvedValueOnce({ success: true });
 
-      const result = await runWithRetries(mockFn, mockArgs, mockSpinner, 3);
+      const result = await runWithRetries(mockFn, mockArgs, mockSpinner, 3, {
+        fallbackModel: 'gpt-3.5-turbo',
+      });
 
       expect(result).toEqual({ success: true });
       expect(mockFn).toHaveBeenCalledTimes(2);
@@ -110,7 +118,11 @@ describe('Error Handling', () => {
 
       const mockFn = vi.fn().mockRejectedValue(authError);
 
-      await expect(runWithRetries(mockFn, mockArgs, mockSpinner, 3)).rejects.toThrow(AbortError);
+      // The original error (not a generic AbortError) must surface so callers can
+      // inspect its class/status.
+      await expect(
+        runWithRetries(mockFn, mockArgs, mockSpinner, 3, { fallbackModel: 'gpt-3.5-turbo' })
+      ).rejects.toBe(authError);
       expect(mockFn).toHaveBeenCalledTimes(1); // Should not retry
     });
 
@@ -118,9 +130,9 @@ describe('Error Handling', () => {
       const validationError = new ValidationError('Persistent validation error');
       const mockFn = vi.fn().mockRejectedValue(validationError);
 
-      await expect(runWithRetries(mockFn, mockArgs, mockSpinner, 2)).rejects.toThrow(
-        'Persistent validation error'
-      );
+      await expect(
+        runWithRetries(mockFn, mockArgs, mockSpinner, 2, { fallbackModel: 'gpt-3.5-turbo' })
+      ).rejects.toThrow('Persistent validation error');
       expect(mockFn).toHaveBeenCalledTimes(3); // Initial + 2 retries
     });
 
@@ -128,7 +140,7 @@ describe('Error Handling', () => {
       const { clearCurrentAttemptNumber } = await import('../src/utils/retry-context.js');
       const mockFn = vi.fn().mockResolvedValue({ success: true });
 
-      await runWithRetries(mockFn, mockArgs, mockSpinner, 3);
+      await runWithRetries(mockFn, mockArgs, mockSpinner, 3, { fallbackModel: 'gpt-3.5-turbo' });
 
       expect(clearCurrentAttemptNumber).toHaveBeenCalledWith(0); // batch index from args
     });
@@ -138,7 +150,7 @@ describe('Error Handling', () => {
       const mockFn = vi.fn().mockRejectedValue(new Error('Unrecoverable error'));
 
       try {
-        await runWithRetries(mockFn, mockArgs, mockSpinner, 1);
+        await runWithRetries(mockFn, mockArgs, mockSpinner, 1, { fallbackModel: 'gpt-3.5-turbo' });
       } catch (error) {
         // Expected to throw
       }
@@ -195,7 +207,7 @@ describe('Error Handling', () => {
         .mockRejectedValueOnce(rateLimitError)
         .mockResolvedValueOnce({ success: true });
 
-      await runWithRetries(mockFn, args, mockSpinner, 2);
+      await runWithRetries(mockFn, args, mockSpinner, 2, { fallbackModel: 'gpt-3.5-turbo' });
 
       // First call should have original args
       expect(mockFn.mock.calls[0][0].input).toEqual(originalInput);
@@ -220,7 +232,7 @@ describe('Error Handling', () => {
         .mockRejectedValueOnce(validationError)
         .mockResolvedValueOnce({ success: true });
 
-      await runWithRetries(mockFn, args, mockSpinner, 2);
+      await runWithRetries(mockFn, args, mockSpinner, 2, { fallbackModel: 'gpt-3.5-turbo' });
 
       // Second call should have modified args
       const secondCallArgs = mockFn.mock.calls[1][0];
@@ -240,8 +252,8 @@ describe('Error Handling', () => {
       const args1 = { ...mockArgs, index: 1 };
       const args2 = { ...mockArgs, index: 2 };
 
-      await runWithRetries(mockFn, args1, mockSpinner, 3);
-      await runWithRetries(mockFn, args2, mockSpinner, 3);
+      await runWithRetries(mockFn, args1, mockSpinner, 3, { fallbackModel: 'gpt-3.5-turbo' });
+      await runWithRetries(mockFn, args2, mockSpinner, 3, { fallbackModel: 'gpt-3.5-turbo' });
 
       expect(setCurrentAttemptNumber).toHaveBeenCalledWith(1, expect.any(Number));
       expect(setCurrentAttemptNumber).toHaveBeenCalledWith(2, expect.any(Number));
@@ -258,7 +270,9 @@ describe('Error Handling', () => {
         model: 'gpt-4',
       };
 
-      await runWithRetries(mockFn, argsWithoutIndex, mockSpinner, 2);
+      await runWithRetries(mockFn, argsWithoutIndex, mockSpinner, 2, {
+        fallbackModel: 'gpt-3.5-turbo',
+      });
 
       expect(setCurrentAttemptNumber).toHaveBeenCalledWith(-1, expect.any(Number));
       expect(clearCurrentAttemptNumber).toHaveBeenCalledWith(-1);
@@ -280,7 +294,9 @@ describe('Error Handling', () => {
         .mockRejectedValueOnce(networkError) // Should abort (unrecoverable)
         .mockResolvedValueOnce({ success: true });
 
-      await expect(runWithRetries(mockFn, mockArgs, mockSpinner, 5)).rejects.toThrow(AbortError);
+      await expect(
+        runWithRetries(mockFn, mockArgs, mockSpinner, 5, { fallbackModel: 'gpt-3.5-turbo' })
+      ).rejects.toBe(networkError);
       expect(mockFn).toHaveBeenCalledTimes(3); // Should stop at unrecoverable error
     });
 
@@ -294,7 +310,7 @@ describe('Error Handling', () => {
         .mockRejectedValueOnce(validationError2)
         .mockResolvedValueOnce({ success: true });
 
-      await runWithRetries(mockFn, mockArgs, mockSpinner, 3);
+      await runWithRetries(mockFn, mockArgs, mockSpinner, 3, { fallbackModel: 'gpt-3.5-turbo' });
 
       // Each retry should add to the error context
       const thirdCallArgs = mockFn.mock.calls[2][0];

@@ -31,6 +31,7 @@ import {
   JsonLdSchema,
 } from '../jsonld/index.js';
 import { createLogger } from '../logging.js';
+import { ConfigurationError } from '../utils/errors.js';
 import { createPIIHandlers } from '../pii_handling/pii_handling.js';
 import type { RecordData } from '../pii_handling/types.js';
 import { processBatch } from './processor.js';
@@ -41,14 +42,17 @@ import { DbStreamingProcessor } from './db-streaming-processor.js';
 import { FileIngestionManager } from './file-ingestion.js';
 import { DatabaseManager, deriveDatabasePath } from '../database/index.js';
 import type { AppConfig } from '../utils/types.js';
-import { setActiveSpinner } from '../utils/ui.js';
+import { setActiveSpinner, warn } from '../utils/ui.js';
+import { RateLimitGate } from '../utils/rate-limit-gate.js';
+import { adjustConcurrency as applyAdaptiveConcurrency } from '../utils/adaptive-concurrency.js';
+import { ThrottledLLMClient } from '../clients/throttled-llm-client.js';
 import type { ValidationErrorDetails } from '../jsonld/types.js';
 
 type JsonSchema = Record<string, unknown>;
 type DbMode = 'fresh' | 'resume';
 type OutputMode = 'rewrite' | 'append';
 type PackageManifest = { name?: string; version?: string };
-export type AnalysisRunSummary = { warningCount: number };
+export type AnalysisRunSummary = { warningCount: number; failedBatchCount: number };
 type RowWarningContext = {
   filePath: string;
   fileCsvLine: number;
@@ -162,16 +166,22 @@ export async function analyzeDataWithDb(
     enableLogging,
     hidePII: enablePiiProcessing,
     retriesNumber,
+    rateLimitMaxRetries,
+    rateLimitMaxWaitMs,
     requiredFieldErrorsFailBatch,
     batchSize,
     concurrencySize,
     defaultModel,
+    fallbackModel,
     uuidColumn,
     rulesPath,
     llmFieldOverrides,
     resumeMode,
     forceReingestion,
     temperature,
+    failFast = false,
+    adaptiveConcurrency,
+    sdkMaxRetries,
   } = normalizedConfig;
 
   const filePaths = getFilePaths(normalizedConfig);
@@ -189,7 +199,21 @@ export async function analyzeDataWithDb(
   const db = new DatabaseManager(dbPath);
   db.connect();
 
-  
+  // Hoisted above the try block so the outer catch/finally (below) can reach them
+  // regardless of where inside the run a failure occurs.
+  let streamingProcessor: DbStreamingProcessor | undefined;
+  let spinner: Ora | null = null;
+  let stopSpinnerUpdate: NodeJS.Timeout | null = null;
+  let handleShutdown: (() => Promise<void>) | undefined;
+  let flushLogsRef: (() => Promise<void>) | undefined;
+  let finalized = false;
+  const finalizeOnce = async (): Promise<void> => {
+    if (finalized) return;
+    finalized = true;
+    if (streamingProcessor) {
+      await streamingProcessor.finalize();
+    }
+  };
 
   try {
     // Check resume mode
@@ -294,7 +318,8 @@ export async function analyzeDataWithDb(
       logRetryAttempt,
       logBatchOutcome,
       getWarningCount,
-    } = createLogger(enableLogging);
+    } = createLogger(enableLogging, batchSize);
+    flushLogsRef = flushLogs;
 
     const { encodePII, decodePII } = createPIIHandlers(enablePiiProcessing);
 
@@ -359,17 +384,26 @@ export async function analyzeDataWithDb(
           ? createAppendingJsonLDWriter(outputPath, schemaPath, provenanceEntry)
           : createJsonLDWriter(outputPath, schemaPath, provenanceEntry);
 
-      const streamingProcessor = new DbStreamingProcessor(writerEarly, rawJsonLdSchema, schema, db);
+      streamingProcessor = new DbStreamingProcessor(writerEarly, rawJsonLdSchema, schema, db);
       await streamingProcessor.restoreFromDatabase();
-      await streamingProcessor.finalize();
+      await finalizeOnce();
 
       db.state.markProcessingCompleted();
       db.close();
-      return { warningCount: getWarningCount() };
+      return { warningCount: getWarningCount(), failedBatchCount: 0 };
     }
 
+    // A rules-only run resolves every schema field deterministically, so no batch will
+    // ever need the LLM (loadRulesConfig already refused to load if any required field
+    // lacked deterministic or LLM coverage, so this check is safe).
+    const isRulesOnlyRun = rulesContext !== null && rulesContext.llmFields.size === 0;
+
     if (!quiet) {
-      console.log(`\n⚙️  Phase 2: LLM Processing (${unprocessedRows.length} rows to process)`);
+      if (isRulesOnlyRun) {
+        console.log(`\n⚙️  Phase 2: Processing (rules-only, no LLM calls)`);
+      } else {
+        console.log(`\n⚙️  Phase 2: LLM Processing (${unprocessedRows.length} rows to process)`);
+      }
     }
 
     const writer =
@@ -377,25 +411,58 @@ export async function analyzeDataWithDb(
         ? createAppendingJsonLDWriter(outputPath, schemaPath, provenanceEntry)
         : createJsonLDWriter(outputPath, schemaPath, provenanceEntry);
 
-    const streamingProcessor = new DbStreamingProcessor(writer, rawJsonLdSchema, schema, db);
+    streamingProcessor = new DbStreamingProcessor(writer, rawJsonLdSchema, schema, db);
 
     // Restore any unwritten merged outputs (this will write entries with written_to_file = 0)
     await streamingProcessor.restoreFromDatabase();
+    // Non-null from here on: assigned unconditionally above. Capturing it in a
+    // `const` lets it be used from inside the batch closures below without a
+    // per-use null check.
+    const processor: DbStreamingProcessor = streamingProcessor;
 
-    // Setup LLM client
+    // Abort signal shared by graceful shutdown, the rate-limit gate (so a Ctrl-C during a
+    // long pause exits immediately instead of waiting it out), and (when failFast is set)
+    // the first batch failure. Batch tasks check it at the start and skip starting new
+    // work once it is set. Declared before the LLM client below so `getClient` can hand
+    // the signal to `ThrottledLLMClient`.
+    const abortController = new AbortController();
+
+    // Process-wide rate-limit gate for this run: every batch's LLM call goes through it,
+    // so a 429 on one batch pauses every other in-flight/new batch too. See the comment
+    // at the top of throttled-llm-client.ts for how this cooperates with retry.ts.
+    const rateLimitGate = new RateLimitGate();
+
+    // Setup LLM client. An explicitly-provided client (tests / programmatic callers) is
+    // used as-is; otherwise the client is created lazily from the environment, memoised
+    // across batches, and only when a batch actually needs it — so runs where every row
+    // is resolved deterministically never require OPENAI_API_KEY to be set. Either way,
+    // the client handed to batches is wrapped in a ThrottledLLMClient bound to this run's
+    // gate, memoised alongside it so the wrap only happens once.
     let client = llmClient;
-    if (!client && unprocessedRows.length > 0) {
-      // Always create client for LLM processing
-      // (deterministic rules are determined per-batch)
-      client = LLMClientFactory.createFromEnv();
-    }
+    let throttledClient: ILLMClient | undefined;
+    const getClient = (fieldListForBatch: string[]): ILLMClient => {
+      if (!client) {
+        if (!process.env.OPENAI_API_KEY) {
+          throw new ConfigurationError(
+            `This run needs OpenAI for fields [${fieldListForBatch.join(', ')}] but OPENAI_API_KEY is not set. ` +
+              'Set the key, or keep these fields deterministic via rules / --no-llm-fields.'
+          );
+        }
+        client = LLMClientFactory.createFromEnv({ maxRetries: sdkMaxRetries });
+      }
+      if (!throttledClient) {
+        throttledClient = new ThrottledLLMClient(client, rateLimitGate, {
+          signal: abortController.signal,
+        });
+      }
+      return throttledClient;
+    };
 
     // Progress tracking
     let processedRowCount = db.results.getTotalProcessedCount();
     const totalRowCount = db.rows.getTotalRowCount();
 
-    let spinner: Ora = ora({ stream: process.stderr, isEnabled: !quiet });
-    let stopSpinnerUpdate: NodeJS.Timeout | null = null;
+    spinner = ora({ stream: process.stderr, isEnabled: !quiet });
 
     if (!quiet) {
       spinner = ora('Processing batches...').start();
@@ -403,15 +470,21 @@ export async function analyzeDataWithDb(
       setActiveSpinner(spinner);
       stopSpinnerUpdate = setInterval(() => {
         const progress = db.state.getProcessingProgress();
-        spinner.text = `Processing: ${progress.processed_rows}/${progress.total_rows} rows, ${progress.completed_uuids}/${progress.total_uuids} UUIDs completed`;
+        const pauseSuffix = rateLimitGate.isPaused
+          ? ` · paused for rate limit (${Math.ceil(rateLimitGate.pausedForMs / 1000)}s)`
+          : '';
+        spinner!.text = `Processing: ${progress.processed_rows}/${progress.total_rows} rows, ${progress.completed_uuids}/${progress.total_uuids} UUIDs completed${pauseSuffix}`;
       }, 500);
     }
+    // Non-null from here on: assigned unconditionally above.
+    const activeSpinner: Ora = spinner;
 
     // Setup graceful shutdown
     let hasError = false;
-    const handleShutdown = async () => {
+    handleShutdown = async () => {
       if (hasError) return;
       hasError = true;
+      abortController.abort();
 
       if (stopSpinnerUpdate) {
         clearInterval(stopSpinnerUpdate);
@@ -419,7 +492,7 @@ export async function analyzeDataWithDb(
       setActiveSpinner(null);
 
       try {
-        await streamingProcessor.finalize();
+        await finalizeOnce();
       } catch (error) {
         console.error('Error finalizing during shutdown:', error);
       }
@@ -441,6 +514,32 @@ export async function analyzeDataWithDb(
     const limit = pLimit(concurrencySize);
     const persistLimit = pLimit(1);
     const batchPromises: Promise<void>[] = [];
+    const failedBatches: Array<{ batchIndex: number; csvLineRange: string; message: string }> = [];
+    // A configuration or authentication problem (missing key, 401/403 from the provider)
+    // cannot be fixed by retrying other batches, so it aborts the whole run immediately —
+    // regardless of failFast — instead of producing one failure line per batch.
+    let fatalError: Error | undefined;
+    const isFatalBatchError = (err: Error): boolean => {
+      if (err instanceof ConfigurationError) return true;
+      const status = (err as { status?: number }).status;
+      return status === 401 || status === 403;
+    };
+
+    // Adapts `limit.concurrency` to the rate-limit gate's recent history. Runs after every
+    // batch settles (success or failure). Halving on repeated 429s reacts fast; ramping
+    // back up requires a sustained run of clean successes so a lone lucky call doesn't
+    // immediately undo the backoff. No-op when adaptiveConcurrency is disabled — the gate
+    // itself still pauses batches regardless of this setting. The actual halve/ramp
+    // algorithm lives in adaptive-concurrency.ts so it can be unit tested on its own.
+    const adjustConcurrency = (): void => {
+      if (adaptiveConcurrency === false) {
+        return;
+      }
+
+      applyAdaptiveConcurrency(rateLimitGate, limit, concurrencySize, (next) => {
+        warn(`Reducing concurrency to ${next} after repeated rate limits`, activeSpinner);
+      });
+    };
 
     // Group unprocessed rows into batches
     const batches: (typeof unprocessedRows)[] = [];
@@ -453,6 +552,10 @@ export async function analyzeDataWithDb(
 
       batchPromises.push(
         limit(async () => {
+          if (abortController.signal.aborted) {
+            return;
+          }
+
           const csvLineStart = batchRows[0].global_row_index + 1;
           const csvLineEnd = batchRows[batchRows.length - 1].global_row_index + 1;
           const csvLineRange = `${csvLineStart}-${csvLineEnd}`;
@@ -510,20 +613,24 @@ export async function analyzeDataWithDb(
               );
             });
 
+            // Union of LLM fields this batch still needs (empty when fully deterministic).
+            // Computed up front so it can also drive lazy LLM client creation below.
+            const pendingFields = new Set<string>();
+            if (deterministicPrefills) {
+              for (const prefill of deterministicPrefills) {
+                for (const field of prefill.pendingFields) {
+                  pendingFields.add(field);
+                }
+              }
+            }
+            const fieldList = Array.from(pendingFields).sort();
+
             // Determine which schema/instructions to use
             let currentInstructions: string;
             let currentZodSchema: ZodTypeAny;
 
             // Check if we need partial schema (only LLM fields)
             if (deterministicPrefills) {
-              const pendingFields = new Set<string>();
-              for (const prefill of deterministicPrefills) {
-                for (const field of prefill.pendingFields) {
-                  pendingFields.add(field);
-                }
-              }
-
-              const fieldList = Array.from(pendingFields).sort();
               if (fieldList.length > 0) {
                 const cacheKey = fieldList.join('|');
                 let cached = partialSchemaCache.get(cacheKey);
@@ -563,16 +670,19 @@ export async function analyzeDataWithDb(
               { role: 'user' as const, content: JSON.stringify(encodedBatch) },
             ];
 
-            // Process batch args
+            // Process batch args. `llmClient` is intentionally left unset here (rather
+            // than passing the raw `client` reference) so processor.ts always resolves via
+            // `getLlmClient()`, which is what returns this run's ThrottledLLMClient —
+            // passing the raw client would let it bypass the rate-limit gate entirely.
             const batchArgs = {
-              llmClient: client,
+              getLlmClient: () => getClient(fieldList),
               instructions: currentInstructions,
               zodSchema: currentZodSchema,
               batchLength: batchData.length,
               index: batchIndex,
               input,
               model: defaultModel,
-              logValidationError: async (error: any) => {
+              logValidationError: async (error: ValidationErrorDetails) => {
                 await logValidationError(attachWarningRowContext(error, rowContextByCsvRowIndex));
               },
               parseZodError: (
@@ -622,13 +732,14 @@ export async function analyzeDataWithDb(
             const results = (await runWithRetries(
               processWithRetries,
               batchArgs,
-              spinner,
-              retriesNumber
+              activeSpinner,
+              retriesNumber,
+              { rateLimitMaxRetries, rateLimitMaxWaitMs, fallbackModel }
             )) as Record<string, unknown>[];
 
             // Serialize DB/output writes to avoid race conditions across concurrent LLM batches.
             await persistLimit(async () => {
-              await streamingProcessor.addBatchResults(results, rowIds);
+              await processor.addBatchResults(results, rowIds);
               processedRowCount += batchData.length;
               db.state.updateLastActivity();
             });
@@ -648,34 +759,93 @@ export async function analyzeDataWithDb(
             console.error(
               `❌ Batch ${batchIndex} failed (rows ${csvLineRange}): ${batchError.message}`
             );
+            failedBatches.push({ batchIndex, csvLineRange, message: batchError.message });
+
+            if (isFatalBatchError(batchError)) {
+              fatalError ??= batchError;
+              abortController.abort();
+            } else if (failFast) {
+              // Stop new batches from starting; already in-flight ones (up to
+              // concurrencySize) are left to settle rather than cancelled here.
+              abortController.abort();
+            }
+
             throw error;
+          } finally {
+            // Runs whether the batch succeeded or failed, so a streak of 429s and the
+            // occasional intervening success are both reflected promptly.
+            adjustConcurrency();
           }
         })
       );
     }
 
-    // Wait for all batches to complete
-    await Promise.all(batchPromises);
+    // A single failed batch must not tear down batches still in flight: allSettled lets
+    // every batch reach persistence (success or failure) before we finalize and report.
+    const settledBatches = await Promise.allSettled(batchPromises);
 
     if (stopSpinnerUpdate) {
       clearInterval(stopSpinnerUpdate);
     }
     setActiveSpinner(null);
 
-    // Finalize
-    await streamingProcessor.finalize();
-    await flushLogs();
+    // Finalize output and flush logs regardless of outcome, wrapped so a failure here
+    // never masks the real result of the run.
+    try {
+      await finalizeOnce();
+    } catch (finalizeError) {
+      console.error('Error finalizing output:', finalizeError);
+    }
+    try {
+      await flushLogs();
+    } catch (flushError) {
+      console.error('Error flushing logs:', flushError);
+    }
 
     const finalProgress = db.state.getProcessingProgress();
     const warningCount = getWarningCount();
+    const failedBatchCount = failedBatches.length;
+
+    if (fatalError) {
+      throw fatalError;
+    }
+
+    if (failFast && failedBatchCount > 0) {
+      const firstRejection = settledBatches.find(
+        (settled): settled is PromiseRejectedResult => settled.status === 'rejected'
+      );
+      throw firstRejection ? firstRejection.reason : new Error('A batch failed (failFast)');
+    }
+
+    if (failedBatchCount > 0) {
+      if (!quiet) {
+        console.error(`❌ ${failedBatchCount} of ${batches.length} batches failed:`);
+        const shown = failedBatches.slice(0, 20);
+        for (const failure of shown) {
+          console.error(
+            `   • batch ${failure.batchIndex} (rows ${failure.csvLineRange}): ${failure.message}`
+          );
+        }
+        if (failedBatches.length > shown.length) {
+          console.error(
+            `   ... and ${failedBatches.length - shown.length} more — see the error log`
+          );
+        }
+        console.error(
+          `   Progress saved to ${dbPath}. Re-run the same command to retry the failed batches.`
+        );
+      }
+
+      return { warningCount, failedBatchCount };
+    }
 
     if (!quiet) {
       if (warningCount > 0) {
-        spinner.warn(
+        activeSpinner.warn(
           `Analysis completed with warnings! ${finalProgress.processed_rows} rows processed, ${finalProgress.completed_uuids} UUIDs completed, ${warningCount} warning(s)`
         );
       } else {
-        spinner.succeed(
+        activeSpinner.succeed(
           `Analysis complete! ${finalProgress.processed_rows} rows processed, ${finalProgress.completed_uuids} UUIDs completed`
         );
       }
@@ -684,10 +854,42 @@ export async function analyzeDataWithDb(
 
     // Mark as completed
     db.state.markProcessingCompleted();
-    return { warningCount };
+    return { warningCount, failedBatchCount: 0 };
   } catch (error) {
+    // A run-level failure (failFast rethrow above, or anything earlier in the pipeline
+    // throwing) must still finalize whatever the SQLite DB already holds, so a crash never
+    // leaves the JSON-LD output unwritten.
+    if (stopSpinnerUpdate) {
+      clearInterval(stopSpinnerUpdate);
+    }
+    setActiveSpinner(null);
+
+    try {
+      await finalizeOnce();
+    } catch (finalizeError) {
+      console.error('Error finalizing output after failure:', finalizeError);
+    }
+    try {
+      await flushLogsRef?.();
+    } catch (flushError) {
+      console.error('Error flushing logs after failure:', flushError);
+    }
+
+    if (!quiet) {
+      const originalMessage = error instanceof Error ? error.message : String(error);
+      const progress = db.state.getProcessingProgress();
+      console.error(`⚠️  Processing stopped: ${originalMessage}`);
+      console.error(
+        `   Progress saved to ${dbPath} (${progress.processed_rows}/${progress.total_rows} rows). Re-run the same command to resume.`
+      );
+    }
+
     throw error;
   } finally {
+    if (handleShutdown) {
+      process.off('SIGINT', handleShutdown);
+      process.off('SIGTERM', handleShutdown);
+    }
     setActiveSpinner(null);
     db.close();
   }

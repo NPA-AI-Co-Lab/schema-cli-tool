@@ -84,6 +84,8 @@ logging/
 
 ### 3.1 Retry Attempt Entry
 
+Validation error with fallback model:
+
 ```json
 {
   "timestamp": "2025-09-30T14:23:45.123Z",
@@ -101,9 +103,29 @@ logging/
 }
 ```
 
+Rate-limit retry (with wait duration):
+
+```json
+{
+  "timestamp": "2025-09-30T14:45:12.567Z",
+  "batch_info": {
+    "batchIndex": 5,
+    "csvLineRange": "25-29"
+  },
+  "retry_info": {
+    "attempt": "2/8",
+    "errorType": "rate_limit_error",
+    "actionTaken": "retry_after_wait",
+    "waitMs": 5000
+  },
+  "error_summary": "429 Too Many Requests"
+}
+```
+
 **Error Types:**
 
-- `api_error` - Rate limits (429) or server errors (500+)
+- `api_error` - Server errors (500+) or other API issues
+- `rate_limit_error` - Rate limit (HTTP 429) returned by OpenAI
 - `validation_error` - Schema validation failure
 - `required_field_error` - Required field missing/null
 - `network_error` - Other network/connection issues
@@ -111,9 +133,14 @@ logging/
 **Action Taken:**
 
 - `retry_same` - Retry with same parameters (for API errors)
+- `retry_after_wait` - Rate-limited; waiting for Retry-After duration then retrying (rate-limit retries only)
 - `retry_with_fallback` - Switched to fallback model (e.g., gpt-4o)
 - `retry_with_context` - Retrying with error context added to prompt
 - `failed` - Final failure after all retries exhausted
+
+**Additional fields (rate-limit retries only):**
+
+- `waitMs` - Milliseconds waited before this retry (the result of `min(rateLimitMaxWaitMs, max(Retry-After, exponential backoff)) + jitter`)
 
 ---
 

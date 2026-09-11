@@ -53,7 +53,9 @@ describe('Batch Processing', () => {
       const mockArgs = { model: 'gpt-4', input: [], index: 0 } as any;
       const mockSpinner = createMockSpinner();
 
-      const result = await runWithRetries(mockFn, mockArgs, mockSpinner, 2);
+      const result = await runWithRetries(mockFn, mockArgs, mockSpinner, 2, {
+        fallbackModel: 'gpt-4.1',
+      });
 
       expect(result).toBe('success');
       expect(mockFn).toHaveBeenCalledTimes(1);
@@ -72,7 +74,9 @@ describe('Batch Processing', () => {
       } as any;
       const mockSpinner = createMockSpinner();
 
-      const result = await runWithRetries(mockFn, mockArgs, mockSpinner, 2);
+      const result = await runWithRetries(mockFn, mockArgs, mockSpinner, 2, {
+        fallbackModel: 'gpt-4.1',
+      });
 
       expect(result).toBe('success after retry');
       expect(mockFn).toHaveBeenCalledTimes(2);
@@ -99,7 +103,9 @@ describe('Batch Processing', () => {
       } as any;
       const mockSpinner = createMockSpinner();
 
-      const result = await runWithRetries(mockFn, mockArgs, mockSpinner, 2);
+      const result = await runWithRetries(mockFn, mockArgs, mockSpinner, 2, {
+        fallbackModel: 'gpt-4.1',
+      });
 
       expect(result).toBe('success after retry');
       expect(mockFn).toHaveBeenCalledTimes(2);
@@ -122,7 +128,9 @@ describe('Batch Processing', () => {
       const mockArgs = { model: 'gpt-4', input: [], index: 0 } as any;
       const mockSpinner = createMockSpinner();
 
-      const result = await runWithRetries(mockFn, mockArgs, mockSpinner, 2);
+      const result = await runWithRetries(mockFn, mockArgs, mockSpinner, 2, {
+        fallbackModel: 'gpt-4.1',
+      });
 
       expect(result).toBe('success after rate limit');
       expect(mockFn).toHaveBeenCalledTimes(2);
@@ -135,9 +143,9 @@ describe('Batch Processing', () => {
       const mockArgs = { model: 'gpt-4', input: [], index: 0 } as any;
       const mockSpinner = createMockSpinner();
 
-      await expect(runWithRetries(mockFn, mockArgs, mockSpinner, 2)).rejects.toThrow(
-        'Unrecoverable error'
-      );
+      await expect(
+        runWithRetries(mockFn, mockArgs, mockSpinner, 2, { fallbackModel: 'gpt-4.1' })
+      ).rejects.toThrow('Unrecoverable error');
 
       expect(mockFn).toHaveBeenCalledTimes(1); // Should not retry
     });
@@ -148,9 +156,9 @@ describe('Batch Processing', () => {
       const mockArgs = { model: 'gpt-4', input: [], index: 0 } as any;
       const mockSpinner = createMockSpinner();
 
-      await expect(runWithRetries(mockFn, mockArgs, mockSpinner, 2)).rejects.toThrow(
-        'Persistent error'
-      );
+      await expect(
+        runWithRetries(mockFn, mockArgs, mockSpinner, 2, { fallbackModel: 'gpt-4.1' })
+      ).rejects.toThrow('Persistent error');
 
       expect(mockFn).toHaveBeenCalledTimes(3); // Initial + 2 retries
     });
@@ -164,7 +172,7 @@ describe('Batch Processing', () => {
       const mockArgs = { model: 'gpt-4', input: [], index: 0 } as any;
       const mockSpinner = createMockSpinner();
 
-      await runWithRetries(mockFn, mockArgs, mockSpinner, 1);
+      await runWithRetries(mockFn, mockArgs, mockSpinner, 1, { fallbackModel: 'gpt-4.1' });
 
       // Verify fallback model was used
       const retryCallArgs = mockFn.mock.calls[1][0];

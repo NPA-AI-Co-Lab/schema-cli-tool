@@ -4,7 +4,7 @@ import {
   bold,
   getAppParams,
   getAppParamsFromConfig,
-  loadAppConfig,
+  loadBaseAppConfig,
   removeCliSigintHandler,
   restoreCliSigintHandler,
 } from '../utils/index.js';
@@ -82,6 +82,18 @@ async function runInteractiveMode(options: CliOptions, pkg: PackageInfo) {
     uuidColumn: baseParams.uuidColumn,
     rulesPath: options.rules || baseParams.rulesPath,
     llmFieldOverrides,
+    rateLimitMaxRetries: options.rateLimitRetries
+      ? parseInt(options.rateLimitRetries, 10)
+      : baseParams.rateLimitMaxRetries,
+    rateLimitMaxWaitMs: options.rateLimitMaxWait
+      ? parseInt(options.rateLimitMaxWait, 10)
+      : baseParams.rateLimitMaxWaitMs,
+    sdkMaxRetries: options.sdkRetries ? parseInt(options.sdkRetries, 10) : baseParams.sdkMaxRetries,
+    adaptiveConcurrency:
+      options.noAdaptiveConcurrency !== undefined
+        ? !options.noAdaptiveConcurrency
+        : baseParams.adaptiveConcurrency,
+    failFast: options.failFast ?? baseParams.failFast,
   };
 
   if (options.stdout) {
@@ -101,7 +113,11 @@ async function runInteractiveMode(options: CliOptions, pkg: PackageInfo) {
     const summary = await analyzeDataWithDb(appParams, undefined, quiet);
 
     if (!quiet) {
-      if (summary.warningCount > 0) {
+      if (summary.failedBatchCount > 0) {
+        console.error(
+          `⚠️  Analysis finished with ${summary.failedBatchCount} failed batch(es). Results saved to: ${appParams.outputPath}`
+        );
+      } else if (summary.warningCount > 0) {
         console.error(
           `Results saved to: ${appParams.outputPath}. Warning count: ${summary.warningCount}`
         );
@@ -110,7 +126,7 @@ async function runInteractiveMode(options: CliOptions, pkg: PackageInfo) {
       }
     }
 
-    process.exitCode = summary.warningCount > 0 ? 2 : 0;
+    process.exitCode = summary.failedBatchCount > 0 ? 1 : summary.warningCount > 0 ? 2 : 0;
   } catch (error) {
     restoreCliSigintHandler();
     throw error;
@@ -131,7 +147,9 @@ async function runCliMode(options: CliOptions, pkg: PackageInfo) {
   validateOptions(options);
 
   // Get base config and apply CLI overrides
-  const baseConfig = options.config ? loadAppConfig(options.config) : loadAppConfig();
+  // Explicit -c file, else ./config.json when present, else built-in defaults — a CLI-only
+  // invocation (-i/-s/-o) must work from any directory.
+  const baseConfig = loadBaseAppConfig(options.config);
 
   const includeFields = parseFieldList(options.llmFields);
   const excludeFields = parseFieldList(options.noLlmFields);
@@ -164,6 +182,18 @@ async function runCliMode(options: CliOptions, pkg: PackageInfo) {
     rulesPath: options.rules || baseConfig.rulesPath,
     llmFieldOverrides,
     resumeMode: baseConfig.resumeMode,
+    rateLimitMaxRetries: options.rateLimitRetries
+      ? parseInt(options.rateLimitRetries, 10)
+      : baseConfig.rateLimitMaxRetries,
+    rateLimitMaxWaitMs: options.rateLimitMaxWait
+      ? parseInt(options.rateLimitMaxWait, 10)
+      : baseConfig.rateLimitMaxWaitMs,
+    sdkMaxRetries: options.sdkRetries ? parseInt(options.sdkRetries, 10) : baseConfig.sdkMaxRetries,
+    adaptiveConcurrency:
+      options.noAdaptiveConcurrency !== undefined
+        ? !options.noAdaptiveConcurrency
+        : baseConfig.adaptiveConcurrency,
+    failFast: options.failFast ?? baseConfig.failFast,
   };
 
   // If stdout mode requested, ensure outputPath signals stdout and set a database path
@@ -194,7 +224,11 @@ async function runCliMode(options: CliOptions, pkg: PackageInfo) {
     const summary = await analyzeDataWithDb(appParams, undefined, quiet);
 
     if (!quiet && outputToFile) {
-      if (summary.warningCount > 0) {
+      if (summary.failedBatchCount > 0) {
+        console.error(
+          `⚠️  Analysis finished with ${summary.failedBatchCount} failed batch(es). Results saved to: ${appParams.outputPath}`
+        );
+      } else if (summary.warningCount > 0) {
         console.error(
           `Results saved to: ${appParams.outputPath}. Warning count: ${summary.warningCount}`
         );
@@ -203,7 +237,7 @@ async function runCliMode(options: CliOptions, pkg: PackageInfo) {
       }
     }
 
-    process.exitCode = summary.warningCount > 0 ? 2 : 0;
+    process.exitCode = summary.failedBatchCount > 0 ? 1 : summary.warningCount > 0 ? 2 : 0;
   } catch (error) {
     restoreCliSigintHandler();
     throw error;

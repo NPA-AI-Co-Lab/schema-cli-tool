@@ -6,6 +6,7 @@ import {
   LLMAnalysisResponse,
   LLMError,
 } from '../interfaces/llm-client.interface.js';
+import { normalizeLLMError } from './llm-errors.js';
 
 /**
  * OpenAI implementation of the LLM client interface
@@ -15,12 +16,21 @@ export class OpenAILLMClient implements ILLMClient {
   private defaultModel: string;
   private fallbackModel: string;
 
-  constructor(apiKey: string, defaultModel: string = 'gpt-4.1', fallbackModel: string = 'gpt-4.1') {
+  constructor(
+    apiKey: string,
+    defaultModel: string = 'gpt-4.1',
+    fallbackModel: string = 'gpt-4.1',
+    options?: { maxRetries?: number; timeoutMs?: number }
+  ) {
     if (!apiKey) {
       throw new Error('OpenAI API key is required');
     }
 
-    this.client = new OpenAI({ apiKey, timeout: 150_000 });
+    this.client = new OpenAI({
+      apiKey,
+      timeout: options?.timeoutMs ?? 150_000,
+      maxRetries: options?.maxRetries ?? 0,
+    });
     this.defaultModel = defaultModel;
     this.fallbackModel = fallbackModel;
   }
@@ -52,12 +62,7 @@ export class OpenAILLMClient implements ILLMClient {
         model: request.model,
       };
     } catch (error) {
-      if (error instanceof Error) {
-        const llmError = new Error(`LLM analysis failed: ${error.message}`) as LLMError;
-        llmError.code = 'ANALYSIS_FAILED';
-        throw llmError;
-      }
-      throw error;
+      throw normalizeLLMError(error, { model: request.model });
     }
   }
 

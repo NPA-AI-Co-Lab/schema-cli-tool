@@ -1,7 +1,8 @@
 data/
 dist/
-node_modules/
-output/
+node_modules
+output/*
+!output/.gitkeep
 playground/
 logging/
 tsconfig.tsbuildinfo
@@ -9,3 +10,9 @@ tsconfig.tsbuildinfo
 .env
 *.db
 local_scripts/
+
+# IDE / OS / local artefacts
+.DS_Store
+.idea/
+*.tgz
+/output.jsonld

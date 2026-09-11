@@ -1,6 +1,6 @@
 {
   "name": "npa-ingest-insight-cli",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "main": "cli.js",
   "type": "module",
   "scripts": {
@@ -15,6 +15,18 @@
   "bin": {
     "npa-insight": "./dist/cli.js"
   },
+  "files": [
+    "dist",
+    "static",
+    "taxonomies",
+    "config",
+    "examples",
+    "output/.gitkeep",
+    ".env.example",
+    "README.md",
+    "LOGGING.md",
+    "CHANGELOG.md"
+  ],
   "keywords": [],
   "author": "",
   "license": "ISC",

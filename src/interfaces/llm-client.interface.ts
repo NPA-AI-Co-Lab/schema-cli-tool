@@ -48,6 +48,14 @@ export interface LLMAnalysisResponse {
 export interface LLMError extends Error {
   code?: string;
   type?: string;
+  /** HTTP status code from the provider, when available */
+  status?: number;
+  /** Milliseconds to wait before retrying, derived from a Retry-After hint */
+  retryAfterMs?: number;
+  /** Whether the error represents a rate-limit response (HTTP 429) */
+  isRateLimit?: boolean;
+  /** Whether the error is safe to retry without changing the request */
+  isRetryable?: boolean;
 }
 
 /**

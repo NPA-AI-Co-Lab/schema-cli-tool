@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { OpenAILLMClient } from '../src/clients/openai-llm-client.js';
 import { LLMClientFactory } from '../src/clients/llm-client-factory.js';
-import type { LLMAnalysisRequest, LLMError } from '../src/interfaces/llm-client.interface.js';
+import { LLMRequestError } from '../src/clients/llm-errors.js';
+import type { LLMAnalysisRequest } from '../src/interfaces/llm-client.interface.js';
 import { z } from 'zod';
 
 // Mock OpenAI module
@@ -43,6 +44,79 @@ describe('LLM Client', () => {
     it('should return correct default and fallback models', () => {
       expect(client.getDefaultModel()).toBe('gpt-4');
       expect(client.getFallbackModel()).toBe('gpt-3.5-turbo');
+    });
+
+    it('should pass maxRetries to OpenAI constructor', async () => {
+      const OpenAI = await import('openai');
+      const mockOpenAIConstructor = vi.mocked(OpenAI.default);
+
+      // Create client with custom maxRetries
+      const clientWithRetries = new OpenAILLMClient('test-api-key', 'gpt-4', 'gpt-3.5-turbo', {
+        maxRetries: 4,
+      });
+
+      // Verify constructor was called with maxRetries
+      expect(mockOpenAIConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({
+          maxRetries: 4,
+        })
+      );
+    });
+
+    it('should use default maxRetries of 0 when not specified', async () => {
+      const OpenAI = await import('openai');
+      const mockOpenAIConstructor = vi.mocked(OpenAI.default);
+
+      // Clear previous calls
+      mockOpenAIConstructor.mockClear();
+
+      // Create client without maxRetries
+      const clientDefault = new OpenAILLMClient('test-api-key', 'gpt-4', 'gpt-3.5-turbo');
+
+      // Verify constructor was called with default maxRetries of 0
+      expect(mockOpenAIConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({
+          maxRetries: 0,
+        })
+      );
+    });
+
+    it('should pass timeoutMs to OpenAI constructor', async () => {
+      const OpenAI = await import('openai');
+      const mockOpenAIConstructor = vi.mocked(OpenAI.default);
+
+      // Clear previous calls
+      mockOpenAIConstructor.mockClear();
+
+      // Create client with custom timeout
+      const clientWithTimeout = new OpenAILLMClient('test-api-key', 'gpt-4', 'gpt-3.5-turbo', {
+        timeoutMs: 200_000,
+      });
+
+      // Verify constructor was called with timeout
+      expect(mockOpenAIConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({
+          timeout: 200_000,
+        })
+      );
+    });
+
+    it('should use default timeout of 150000ms when not specified', async () => {
+      const OpenAI = await import('openai');
+      const mockOpenAIConstructor = vi.mocked(OpenAI.default);
+
+      // Clear previous calls
+      mockOpenAIConstructor.mockClear();
+
+      // Create client without timeout option
+      const clientDefaultTimeout = new OpenAILLMClient('test-api-key', 'gpt-4', 'gpt-3.5-turbo');
+
+      // Verify constructor was called with default timeout
+      expect(mockOpenAIConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({
+          timeout: 150_000,
+        })
+      );
     });
 
     it('should successfully analyze data with valid response', async () => {
@@ -93,9 +167,12 @@ describe('LLM Client', () => {
         await client.analyze(request);
         expect.fail('Should have thrown an error');
       } catch (error) {
-        const llmError = error as LLMError;
-        expect(llmError.message).toBe('LLM analysis failed: OpenAI API error: Rate limit exceeded');
-        expect(llmError.code).toBe('ANALYSIS_FAILED');
+        expect(error).toBeInstanceOf(LLMRequestError);
+        const llmError = error as LLMRequestError;
+        expect(llmError.message).toBe('OpenAI API error: Rate limit exceeded');
+        expect(llmError.code).toBe('rate_limit_exceeded');
+        expect(llmError.isRateLimit).toBe(true);
+        expect(llmError.isRetryable).toBe(true);
       }
     });
 
@@ -109,13 +186,41 @@ describe('LLM Client', () => {
         zodSchema: z.object({}),
       };
 
-      await expect(client.analyze(request)).rejects.toThrow('LLM analysis failed: Network error');
+      await expect(client.analyze(request)).rejects.toThrow('Network error');
 
       try {
         await client.analyze(request);
       } catch (error) {
-        const llmError = error as LLMError;
-        expect(llmError.code).toBe('ANALYSIS_FAILED');
+        expect(error).toBeInstanceOf(LLMRequestError);
+        const llmError = error as LLMRequestError;
+        expect(llmError.isRetryable).toBe(false);
+      }
+    });
+
+    it('should preserve status/headers on a raw 429 rejection (regression for rl-1)', async () => {
+      mockOpenAI.responses.create.mockRejectedValue({
+        status: 429,
+        headers: new Headers({ 'retry-after-ms': '1200' }),
+        message: 'Rate limit reached',
+      });
+
+      const request: LLMAnalysisRequest = {
+        model: 'gpt-4',
+        instructions: 'Extract entities',
+        input: [{ role: 'user', content: 'Test data' }],
+        zodSchema: z.object({}),
+      };
+
+      try {
+        await client.analyze(request);
+        expect.fail('Should have thrown an error');
+      } catch (error) {
+        expect(error).toBeInstanceOf(LLMRequestError);
+        const llmError = error as LLMRequestError;
+        expect(llmError.status).toBe(429);
+        expect(llmError.isRateLimit).toBe(true);
+        expect(llmError.isRetryable).toBe(true);
+        expect(llmError.retryAfterMs).toBe(1200);
       }
     });
 
@@ -167,6 +272,32 @@ describe('LLM Client', () => {
       expect(() => LLMClientFactory.createFromEnv()).toThrow();
     });
 
+    it('should accept maxRetries override in createFromEnv', () => {
+      process.env.OPENAI_API_KEY = 'test-key';
+
+      const client = LLMClientFactory.createFromEnv({ maxRetries: 4 });
+
+      expect(client).toBeInstanceOf(OpenAILLMClient);
+    });
+
+    it('should read OPENAI_MAX_RETRIES from environment', () => {
+      process.env.OPENAI_API_KEY = 'test-key';
+      process.env.OPENAI_MAX_RETRIES = '2';
+
+      const client = LLMClientFactory.createFromEnv();
+
+      expect(client).toBeInstanceOf(OpenAILLMClient);
+    });
+
+    it('should prefer override maxRetries over environment variable', () => {
+      process.env.OPENAI_API_KEY = 'test-key';
+      process.env.OPENAI_MAX_RETRIES = '2';
+
+      const client = LLMClientFactory.createFromEnv({ maxRetries: 4 });
+
+      expect(client).toBeInstanceOf(OpenAILLMClient);
+    });
+
     it('should support provider swapping', () => {
       process.env.OPENAI_API_KEY = 'test-key';
 
@@ -180,6 +311,57 @@ describe('LLM Client', () => {
         process.env.LLM_PROVIDER = 'anthropic';
         LLMClientFactory.createFromEnv();
       }).toThrow('Unsupported LLM provider');
+    });
+
+    it('should warn when OPENAI_API_KEY looks like a placeholder', async () => {
+      vi.resetModules();
+      const { LLMClientFactory: Factory1 } = await import('../src/clients/llm-client-factory.js');
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      process.env.OPENAI_API_KEY = 'placeholder-key';
+
+      Factory1.createFromEnv();
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        'OPENAI_API_KEY does not look like a real OpenAI key. The AI path will fail with 401 if this is a placeholder.'
+      );
+
+      warnSpy.mockRestore();
+    });
+
+    it('should not warn when OPENAI_API_KEY looks like a real OpenAI key', async () => {
+      vi.resetModules();
+      const { LLMClientFactory: Factory2 } = await import('../src/clients/llm-client-factory.js');
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      process.env.OPENAI_API_KEY = 'sk-' + 'a'.repeat(50);
+
+      Factory2.createFromEnv();
+
+      const placeholderWarnings = warnSpy.mock.calls.filter((call) =>
+        String(call[0]).includes('does not look like a real OpenAI key')
+      );
+      expect(placeholderWarnings).toHaveLength(0);
+
+      warnSpy.mockRestore();
+    });
+
+    it('should warn only once per process for placeholder key', async () => {
+      vi.resetModules();
+      const { LLMClientFactory: Factory3 } = await import('../src/clients/llm-client-factory.js');
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      process.env.OPENAI_API_KEY = 'invalid-key';
+
+      Factory3.createFromEnv();
+      Factory3.createFromEnv();
+
+      const placeholderWarnings = warnSpy.mock.calls.filter((call) =>
+        String(call[0]).includes('does not look like a real OpenAI key')
+      );
+      expect(placeholderWarnings).toHaveLength(1);
+
+      warnSpy.mockRestore();
     });
   });
 

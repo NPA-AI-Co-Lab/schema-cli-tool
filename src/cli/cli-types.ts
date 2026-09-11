@@ -27,6 +27,13 @@ export interface CliOptions {
   requiredFieldsFailBatch?: boolean;
   stdout?: boolean;
   quiet?: boolean;
+
+  // Rate-limit options
+  rateLimitRetries?: string;
+  rateLimitMaxWait?: string;
+  sdkRetries?: string;
+  noAdaptiveConcurrency?: boolean;
+  failFast?: boolean;
 }
 
 export interface ConfigBuildResult {

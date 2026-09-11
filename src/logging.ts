@@ -1,6 +1,6 @@
 import { appendFile, mkdir, writeFile } from 'fs/promises';
 import path from 'path';
-import { basePath, getCurrentAttemptNumber, loadGlobalConfig } from './utils/index.js';
+import { basePath, getCurrentAttemptNumber } from './utils/index.js';
 import pLimit from 'p-limit';
 import { ZodError } from 'zod';
 import { ValidationErrorDetails } from './jsonld/index.js';
@@ -13,7 +13,6 @@ const RETRY_LOG_DIR = path.join(LOG_DIR, 'retry_attempts');
 const BATCH_OUTCOME_LOG_DIR = path.join(LOG_DIR, 'batch_outcomes');
 const UUID_LOG_DIR = path.join(LOG_DIR, 'uuid_generation');
 const WRITE_LIMIT = pLimit(1);
-const { BATCH_SIZE } = loadGlobalConfig();
 
 const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
 const logFile = path.join(LLM_INPUT_LOG_DIR, `llm_input_${timestamp}.log`);
@@ -51,8 +50,8 @@ function asyncAppendFile(filePath: string, data: string) {
   return writePromise;
 }
 
-function log(batchIndex: number, records: Record<string, string>[]) {
-  const startLine = batchIndex * BATCH_SIZE;
+function log(batchIndex: number, records: Record<string, string>[], batchSize: number) {
+  const startLine = batchIndex * batchSize;
   const endLine = startLine + records.length - 1;
 
   const logEntry = {
@@ -184,10 +183,22 @@ export interface RetryAttemptDetails {
   csvLineRange: string;
   attemptNumber: number;
   totalRetries: number;
-  errorType: 'api_error' | 'validation_error' | 'required_field_error' | 'network_error';
+  errorType:
+    | 'api_error'
+    | 'validation_error'
+    | 'required_field_error'
+    | 'network_error'
+    | 'rate_limit_error';
   errorMessage: string;
-  actionTaken: 'retry_same' | 'retry_with_fallback' | 'retry_with_context' | 'failed';
+  actionTaken:
+    | 'retry_same'
+    | 'retry_with_fallback'
+    | 'retry_with_context'
+    | 'retry_after_wait'
+    | 'failed';
   fallbackModel?: string;
+  /** Milliseconds waited before this retry (rate-limit retries only) */
+  waitMs?: number;
 }
 
 export interface BatchOutcomeDetails {
@@ -212,6 +223,7 @@ function logRetryAttempt(details: RetryAttemptDetails) {
       errorType: details.errorType,
       actionTaken: details.actionTaken,
       fallbackModel: details.fallbackModel,
+      waitMs: details.waitMs,
     },
     error_summary: details.errorMessage,
   };
@@ -288,7 +300,7 @@ async function flushLogs() {
   await Promise.all(pendingWrites);
 }
 
-export function createLogger(enableLogging: boolean) {
+export function createLogger(enableLogging: boolean, batchSize = 5) {
   let warningCount = 0;
 
   const countedLogValidationError = async (
@@ -305,7 +317,8 @@ export function createLogger(enableLogging: boolean) {
 
   return enableLogging
     ? {
-        log,
+        log: (batchIndex: number, records: Record<string, string>[]) =>
+          log(batchIndex, records, batchSize),
         logValidationError: async (errorDetails: ValidationErrorDetails) =>
           countedLogValidationError(errorDetails, true),
         parseZodError,

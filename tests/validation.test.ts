@@ -217,6 +217,7 @@ describe('Validation', () => {
         index: 1,
         csvLineStart: 5,
         batchLength: 1,
+        csvRowIndexes: undefined,
       };
 
       try {
@@ -230,7 +231,9 @@ describe('Validation', () => {
         1, // index
         5, // csvLineStart
         5, // csvLineEnd (csvLineStart + batchLength - 1)
-        invalidOutput
+        invalidOutput,
+        undefined, // extra argument
+        undefined // csvRowIndexes
       );
       expect(logValidationError).toHaveBeenCalledWith(
         expect.objectContaining({

@@ -34,7 +34,7 @@ The tool supports multiple LLM providers through a pluggable client architecture
 ## Prerequisites
 
 - Node.js (v18 or higher)
-- LLM API key (currently supports OpenAI)
+- An OpenAI API key is required only for the AI path (fields listed under `llm.fields` in your rules file). Rules-only runs need no key. See [Deterministic rules file](#deterministic-rules-file) for how to write a rules file where every field is determined without LLM calls.
 
 ## Installation
 
@@ -51,14 +51,16 @@ cd npa-ingest-insight-cli
 npm install
 ```
 
-3. Set up your LLM API key (choose one method), guide for OpenAI:
+3. Set up your LLM API key (skip if running in rules-only mode). Choose one method to provide your OpenAI API key:
 
 **Option A: Environment Variable**
+
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
 **Option B: .env file**
+
 ```bash
 # Edit the .env file and add your API key
 OPENAI_API_KEY=your-api-key-here
@@ -97,8 +99,13 @@ Create a configuration file (`config.json`) with your data and schema paths:
   "fallbackModel": "gpt-4o",
   "temperature": 0,
   "uuidColumn": "primaryEmail",
-    "rulesPath": "./config/sample_comments.rules.json",
-    "forceReingestion": false
+  "rulesPath": "./config/sample_comments.rules.json",
+  "forceReingestion": false,
+  "rateLimitMaxRetries": 6,
+  "rateLimitMaxWaitMs": 90000,
+  "sdkMaxRetries": 0,
+  "adaptiveConcurrency": true,
+  "failFast": false
 }
 ```
 
@@ -110,7 +117,7 @@ Create a configuration file (`config.json`) with your data and schema paths:
 - **resumeMode** (optional) controls resume behavior: `"auto"` (default), `"fresh"`, or `"resume"`;
 - **enableLogging** enables/disables logging of AI prompts and error messages into separate files;
 - **hidePII** enables/disables PII handling logic.
-- **retriesNumber** specifies how many retries the program will make on an erroneous API response before stopping the analysis.
+- **retriesNumber** specifies how many retries the program will make on validation and model errors (default 2, range 0-10); rate-limit errors use `rateLimitMaxRetries` instead.
 - **requiredFieldErrorsFailBatch** is an optional flag specifying how the tool should handle missing required fields - similarly to other validation errors if true, or by simply logging them if false.
 - **batchSize** - Number of data rows sent per request to the LLM API;
 - **concurrencySize** - Maximum number of asynchronous prompts that can run at once;
@@ -123,6 +130,38 @@ Create a configuration file (`config.json`) with your data and schema paths:
   of the row so the same row keeps the same ID across reruns. For this row-digest fallback, changing a column name or
   value changes the UUID, while changing the file name, schema, or rules does not.
 - **rulesPath** - Optional path to a deterministic mapping file. When provided, the CLI will map rows rule-first and only invoke the LLM for unresolved fields.
+- **rateLimitMaxRetries** - Extra retries reserved for rate-limit (429) and transient 5xx errors, separate from retriesNumber (default 6, range 0-20).
+- **rateLimitMaxWaitMs** - Upper bound in milliseconds for a single Retry-After wait (default 90000, range 1000-600000).
+- **sdkMaxRetries** - OpenAI SDK built-in retry count (default 0, range 0-5). Kept at 0 on purpose: the CLI's own retry layer already retries 429/5xx/connection errors, and it must see a 429 promptly to pause the other batches — SDK-internal retries would hide it for up to a minute each.
+- **adaptiveConcurrency** - If true, halve concurrency after repeated rate limits and ramp back on success (default true).
+- **failFast** - If true, abort the run on the first failed batch instead of continuing and reporting (default false).
+
+Note: `retriesNumber` now only governs validation and model errors; rate-limit errors use `rateLimitMaxRetries`.
+
+### Running on a new or low-tier OpenAI account
+
+New OpenAI accounts are subject to per-minute and per-day rate limits (tokens/minute and requests/minute). When the CLI hits a rate limit (HTTP 429), it:
+
+1. Waits for the provider's `Retry-After` hint (up to a ceiling of `rateLimitMaxWaitMs`, default 90 seconds).
+2. Pauses all concurrent batch processing for the entire wait period — this is a process-wide gate, so all threads back off together.
+3. When `adaptiveConcurrency` is enabled (default true), halves concurrency after repeated rate limits and ramps back up after sustained success.
+4. Never drops the run; it retries rate-limited batches with a separate budget (`rateLimitMaxRetries`, independent from validation retries).
+
+**What you see in the spinner:** During a rate-limit wait, the spinner text includes `· paused for rate limit (XXs)` to show progress toward resumption.
+
+**To run on a new or low-tier account,** use the preset at `config/hackathon.config.json` with conservative settings:
+- **Concurrency:** 2 (down from typical 5-20)
+- **Rate-limit retries:** 8 (up from default 6, up to ~2 minutes per wait)
+- **Rate-limit max wait:** 120000ms (2 minutes, vs default 90 seconds)
+- **Models:** `gpt-4.1-mini` for both default and fallback (not `gpt-4o` for fallback, since the default fallback has lower rate limits on new accounts)
+
+Customize `dataPaths` and other paths to match your data, or pass settings via CLI:
+
+```bash
+npm run start analyze --config config/hackathon.config.json
+# or customize inline:
+npm run start analyze --config config.json --concurrency 2 --rate-limit-retries 8
+```
 
 ### Multi-File Processing
 
@@ -137,15 +176,11 @@ Example configuration (multi-file):
 
 ```json
 {
-    "dataPaths": [
-        "./data/file1.csv",
-        "./data/file2.csv",
-        "./data/file3.csv"
-    ],
-    "schemaPath": "./schema.jsonld",
-    "outputPath": "./output/results.jsonld",
-    "databasePath": "./output/results.db",
-    "uuidColumn": "primaryEmail"
+  "dataPaths": ["./data/file1.csv", "./data/file2.csv", "./data/file3.csv"],
+  "schemaPath": "./schema.jsonld",
+  "outputPath": "./output/results.jsonld",
+  "databasePath": "./output/results.db",
+  "uuidColumn": "primaryEmail"
 }
 ```
 
@@ -176,6 +211,29 @@ Resume modes (configurable via `resumeMode`):
 - `resume`: attempt to resume and fail if the saved configuration differs from the current run.
 
 Backward compatibility: single-file configs using `dataPath` are still supported and are internally normalized to `dataPaths: [dataPath]`.
+
+### Resuming after a failure
+
+When batch processing fails (due to rate limits, validation errors, or other issues), the CLI:
+
+1. **Reports failed batches** with specific row ranges in the console output (e.g., "❌ 2 of 50 batches failed: batch 10 (rows 50-54), batch 23 (rows 115-119)").
+2. **Saves progress** to the SQLite database (`databasePath`). All successfully processed rows, LLM results, and batch state are retained.
+3. **Exits with a code** indicating the outcome:
+   - **Exit code 0:** Success — no failures or warnings.
+   - **Exit code 1:** One or more batches failed; some data was not processed.
+   - **Exit code 2:** All batches succeeded but validation warnings were present.
+
+To resume processing after a failure, **re-run the same command:**
+
+```bash
+npm run start analyze --config config.json
+```
+
+The CLI will:
+- Detect the existing database and resume configuration matches.
+- Skip rows already processed and LLM results already saved.
+- Retry only the failed batches.
+- The message `Progress saved to <path>. Re-run the same command to retry the failed batches.` confirms this behavior.
 
 ### Deterministic rules file
 
@@ -240,155 +298,155 @@ A proper schema file should be a JSONLD with the following structure:
 
 ```json
 {
-    "@context": {
-        "@vocab": "https://schema.org/",
-        "activitystream": "https://www.w3.org/ns/activitystreams#",
-        "userID": "identifier",
-        "personID": "identifier",
-        "objectID": "identifier",
-        "primaryEmail": "email",
-        "additionalEmails": "email",
-        "engagementScore": "ratingValue",
-        "donorStatus": "category",
-        "lastDonationDate": "dateCreated",
-        "tags": "keywords",
-        "dataSource": "isBasedOn"
-    },
-    "entities": {
-        "person": {
-            "@type": "Person",
-            "idProp": "userID",
-            "properties": {
-                "userID": {
-                    "type": "string",
-                    "description": "Global user ID",
-                    "format": "uuid",
-                    "required": true
-                },
-                "givenName": {
-                    "type": "string",
-                    "description": "First name of the user"
-                },
-                "familyName": {
-                    "type": "string",
-                    "description": "Last name of the user"
-                },
-                "primaryEmail": {
-                    "type": "string",
-                    "description": "The primary contact address for the user. If the user has authenticated, this should be supplied. Otherwise it will be blank or undefined."
-                },
-                "additionalEmails": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    },
-                    "description": "An array of additional addresses, for the purposes of matching."
-                },
-                "engagementScore": {
-                    "type": "number",
-                    "minimum": 1,
-                    "maximum": 5,
-                    "description": "A numeric score from 1-5 representing the user’s engagement with the newsroom’s content."
-                },
-                "tags": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    },
-                    "description": "An array of tags that could also represent MailChimp lists."
-                },
-                "dataSource": {
-                    "type": "string",
-                    "description": "Where this record originated",
-                    "required": true
-                },
-                "consentDate": {
-                    "type": "string",
-                    "description": "Date-time when user gave consent"
-                },
-                "consentType": {
-                    "type": "string",
-                    "enumFromTaxonomy": "ConsentType-v1",
-                    "description": "The type of consent the user has given"
-                },
-                "demographics": {
-                    "type": "object",
-                    "properties": {
-                        "ageGroup": {
-                            "type": "string",
-                            "enumFromTaxonomy": "AgeGroup-v1",
-                            "description": "Age group of the user"
-                        },
-                        "gender": {
-                            "type": "string",
-                            "enumFromTaxonomy": "Gender-v1",
-                            "description": "Gender of the user"
-                        },
-                        "educationLevel": {
-                            "type": "string",
-                            "enumFromTaxonomy": "EducationLevel-v1",
-                            "description": "Education level of the user"
-                        },
-                        "incomeBracket": {
-                            "type": "string",
-                            "enumFromTaxonomy": "IncomeBracket-v1",
-                            "description": "Income bracket of the user"
-                        }
-                    }
-                },
-                "location": {
-                    "type": "object",
-                    "properties": {
-                        "postalCode": {
-                            "type": "string",
-                            "description": "A deliberately freeform field that can take postal code in a variety of local forms. (US zip codes are numeric, but national systems vary.) "
-                        },
-                        "addressCountry": {
-                            "type": "string",
-                            "description": "Two-letter ISO 3166-1 country code"
-                        },
-                        "addressLocality": {
-                            "type": "string",
-                            "description": "City or locality"
-                        }
-                    }
-                },
-                "behavior": {
-                    "type": "object",
-                    "properties": {
-                        "donorStatus": {
-                            "type": "string",
-                            "enumFromTaxonomy": "DonorStatus-v1",
-                            "description": "An indicator whether the user is a donor"
-                        },
-                        "lastDonationDate": {
-                            "type": "string",
-                            "description": "formatted date-time representing when the user last donated."
-                        }
-                    }
-                },
-                "interests": {
-                    "type": "object",
-                    "properties": {
-                        "topics": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            },
-                            "description": "An array of topics that the user is interested in."
-                        },
-                        "commentedOn": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            },
-                            "description": "An array of topics that the user has commented on."
-                        }
-                    }
-                }
+  "@context": {
+    "@vocab": "https://schema.org/",
+    "activitystream": "https://www.w3.org/ns/activitystreams#",
+    "userID": "identifier",
+    "personID": "identifier",
+    "objectID": "identifier",
+    "primaryEmail": "email",
+    "additionalEmails": "email",
+    "engagementScore": "ratingValue",
+    "donorStatus": "category",
+    "lastDonationDate": "dateCreated",
+    "tags": "keywords",
+    "dataSource": "isBasedOn"
+  },
+  "entities": {
+    "person": {
+      "@type": "Person",
+      "idProp": "userID",
+      "properties": {
+        "userID": {
+          "type": "string",
+          "description": "Global user ID",
+          "format": "uuid",
+          "required": true
+        },
+        "givenName": {
+          "type": "string",
+          "description": "First name of the user"
+        },
+        "familyName": {
+          "type": "string",
+          "description": "Last name of the user"
+        },
+        "primaryEmail": {
+          "type": "string",
+          "description": "The primary contact address for the user. If the user has authenticated, this should be supplied. Otherwise it will be blank or undefined."
+        },
+        "additionalEmails": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "An array of additional addresses, for the purposes of matching."
+        },
+        "engagementScore": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 5,
+          "description": "A numeric score from 1-5 representing the user’s engagement with the newsroom’s content."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "An array of tags that could also represent MailChimp lists."
+        },
+        "dataSource": {
+          "type": "string",
+          "description": "Where this record originated",
+          "required": true
+        },
+        "consentDate": {
+          "type": "string",
+          "description": "Date-time when user gave consent"
+        },
+        "consentType": {
+          "type": "string",
+          "enumFromTaxonomy": "ConsentType-v1",
+          "description": "The type of consent the user has given"
+        },
+        "demographics": {
+          "type": "object",
+          "properties": {
+            "ageGroup": {
+              "type": "string",
+              "enumFromTaxonomy": "AgeGroup-v1",
+              "description": "Age group of the user"
+            },
+            "gender": {
+              "type": "string",
+              "enumFromTaxonomy": "Gender-v1",
+              "description": "Gender of the user"
+            },
+            "educationLevel": {
+              "type": "string",
+              "enumFromTaxonomy": "EducationLevel-v1",
+              "description": "Education level of the user"
+            },
+            "incomeBracket": {
+              "type": "string",
+              "enumFromTaxonomy": "IncomeBracket-v1",
+              "description": "Income bracket of the user"
             }
+          }
+        },
+        "location": {
+          "type": "object",
+          "properties": {
+            "postalCode": {
+              "type": "string",
+              "description": "A deliberately freeform field that can take postal code in a variety of local forms. (US zip codes are numeric, but national systems vary.) "
+            },
+            "addressCountry": {
+              "type": "string",
+              "description": "Two-letter ISO 3166-1 country code"
+            },
+            "addressLocality": {
+              "type": "string",
+              "description": "City or locality"
+            }
+          }
+        },
+        "behavior": {
+          "type": "object",
+          "properties": {
+            "donorStatus": {
+              "type": "string",
+              "enumFromTaxonomy": "DonorStatus-v1",
+              "description": "An indicator whether the user is a donor"
+            },
+            "lastDonationDate": {
+              "type": "string",
+              "description": "formatted date-time representing when the user last donated."
+            }
+          }
+        },
+        "interests": {
+          "type": "object",
+          "properties": {
+            "topics": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "An array of topics that the user is interested in."
+            },
+            "commentedOn": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "An array of topics that the user has commented on."
+            }
+          }
         }
+      }
     }
+  }
 }
 ```
 
@@ -416,15 +474,15 @@ You can also find examples of [config](./config.json) and [schema](./examples/sc
 
 This file is located inside the **./static** folder. It specifies which columns will be encoded, and what placeholder will the agent see in their place. There is also an optional **multi** attribute, which allows parsing of several PII entities, separated by a delimiter, in a single column.
 
-***Important***:
+**_Important_**:
 
 If there are other PII fields you want to hide - please, add them to the file. For column names, use lower case, with no spaces. Placeholder has to contain "{ind}".
-Example: Email Address -> “emailaddress”: { “placeholder”: “EMAIL_{ind}@GMAIL.COM” }.
-
+Example: Email Address -> “emailaddress”: { “placeholder”: “EMAIL\_{ind}@GMAIL.COM” }.
 
 ### Restrictions
 
 There are several ways to enforce rules onto the fields of your schema. Most important among them:
+
 - **required** defines if the field can be left empty;
 - **format** enables enforcement of one of several basic string formats ($email$, $date$, $time$, $datetime$, $duration$, $uuid$);
 - **pattern** allows enforcement of other formats via a regex expression;
@@ -437,6 +495,7 @@ The application uses a `.env` file for configuration. Key settings include:
 - **OPENAI_API_KEY** - Your LLM API key (currently OpenAI, alternative to environment variable)
 
 Example `.env` file:
+
 ```bash
 OPENAI_API_KEY=your_api_key_here
 ```
@@ -457,6 +516,7 @@ node dist/cli.js analyze
 ```
 
 The CLI will prompt you for:
+
 - **Configuration file path**: Path to your config.json
 - **Output file path**: Where to save results (.jsonld) (only if not specified in config)
 
@@ -474,6 +534,7 @@ node dist/cli.js analyze --config ./path/to/config.json
 ```
 
 When using the `--config` argument:
+
 - No interactive prompts will be shown
 - All configuration must be specified in the config file, including `outputPath`
 - Perfect for automation, CI/CD pipelines, and integration with other systems
@@ -513,6 +574,7 @@ npm run test:coverage
 ```
 
 **Test Coverage:**
+
 - **Validation testing** - Length checks, Zod schema validation, required fields
 - **Error handling** - Retry logic, error classification, complex scenarios
 - **PII handling** - Detection, encoding/decoding, data protection
@@ -550,6 +612,7 @@ npm run test:coverage
 └── README.md
 
 ```
+
 ### Versioning
 
 This project follows [Semantic Versioning 2.0.0](https://semver.org/).

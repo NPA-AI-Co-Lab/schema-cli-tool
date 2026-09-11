@@ -32,6 +32,11 @@ export function setupCliProgram(program: Command, pkg: PackageInfo) {
     .option('--required-fields-fail-batch', 'Fail entire batch on required field errors')
     .option('--stdout', 'Output results to stdout instead of file')
     .option('-q, --quiet', 'Suppress informational output (stderr)')
+    .option('--rate-limit-retries <n>', 'Extra retries for rate-limit errors (0-20)')
+    .option('--rate-limit-max-wait <ms>', 'Upper bound for Retry-After wait in ms (1000-600000)')
+    .option('--sdk-retries <n>', 'OpenAI SDK retry count (0-5)')
+    .option('--no-adaptive-concurrency', 'Disable adaptive concurrency halving')
+    .option('--fail-fast', 'Abort on first failed batch')
     .action((options: CliOptions) => runAnalyzeCommand(options, pkg));
 
   program.addHelpText(
@@ -65,6 +70,9 @@ Examples:
 
   # Custom processing parameters
   ${pkg.name} analyze -i data.csv -s schema.jsonld --batch-size 3 --concurrency 2 --retries 3
+
+  # Rate-limit handling options
+  ${pkg.name} analyze -c config.json --rate-limit-retries 10 --rate-limit-max-wait 60000 --sdk-retries 4
 
 Note:
   - Running without -i/--input or -c/--config will start interactive mode

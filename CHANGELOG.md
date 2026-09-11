@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [2.2.0] - 2026-09-11
+
+### Fixed
+
+- OpenAI rate limit handling: SDK errors now surface to retry gate immediately; Retry-After headers are honoured with separate budget (default 6 retries, 90s max wait); output is finalized and resume hint printed on failure
+- Single failed batch no longer aborts entire run; Promise.allSettled now captures summary of failures with exit code 1
+- API key no longer required for rules-only runs; lazy LLM client creation
+- Placeholder OpenAI key detection and warning
+- CLI starts from any working directory: `./config.json` is no longer read at module load, and CLI-only invocations (`analyze -i … -s … -o …` without `-c`) fall back to built-in defaults when no `./config.json` exists (found by QA on a clean global install)
+- Fallback model for validation retries now comes from the run's config (`fallbackModel` / `--fallback-model`) instead of whatever `./config.json` happened to be in the current directory
+- 401/403 from the provider and configuration errors (e.g. missing key) abort the run immediately with one clear message instead of one failure per batch
+
+### Added
+
+- Rate-limit gate (`RateLimitGate`) with Retry-After awareness and separate budgeting
+- Metered release after a rate-limit pause: waiting batches are let through one per Retry-After interval (spacing halves after every 3 consecutive successes) instead of all at once, so concurrent batches stop burning their retry budget on contention (QA: concurrency 10 vs 3 RPM previously failed 7 of 16 batches; now 0)
+- `files` whitelist in `package.json` — the npm tarball ships only `dist`, `static`, `taxonomies`, `config`, `examples` and docs (203 → 95 files)
+- Throttled LLM client with adaptive concurrency (halves after 2 consecutive 429s, ramps +1 after 20 clean successes)
+- `src/clients/llm-errors.ts` with `LLMRequestError`, `normalizeLLMError`, and `parseRetryAfterMs`
+- Hackathon configuration preset (`config/hackathon.config.json`) for new/low-tier OpenAI accounts
+- CLI flags: `--rate-limit-retries`, `--rate-limit-max-wait`, `--sdk-retries`, `--no-adaptive-concurrency`, `--fail-fast`
+- Configuration options: `rateLimitMaxRetries` (default 6), `rateLimitMaxWaitMs` (default 90000), `sdkMaxRetries` (default 0), `adaptiveConcurrency` (default true), `failFast` (default false)
+- Logging enhancements: new error type `rate_limit_error`, action `retry_after_wait`, and field `waitMs`
+
+### Changed
+
+- `retriesNumber` config option now applies to validation/model errors only, not rate limits
+- Fallback model is never used for 429/5xx responses
+- `runWithRetries` rejects with original error instead of generic AbortError
+- OpenAI SDK `maxRetries` defaults to 0 (intentional) so rate limits surface immediately to the gate
+- `.gitignore` updated to track `output/.gitkeep` and ignore `node_modules` without trailing slash
+- Test suite expanded from 117 to 200 passing tests
+
 ## [2.1.0] -2026-03-02
 
 ### Added

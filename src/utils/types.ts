@@ -43,6 +43,16 @@ export interface AppConfig {
   forceReingestion?: boolean;
   /** LLM sampling temperature (0–2). Defaults to 0 for deterministic extraction. */
   temperature?: number;
+  /** Extra retries reserved for rate-limit (429) and transient 5xx errors, separate from retriesNumber (default 6) */
+  rateLimitMaxRetries?: number;
+  /** Upper bound in ms for a single Retry-After wait (default 90000) */
+  rateLimitMaxWaitMs?: number;
+  /** OpenAI SDK built-in retry count (default 0 — the CLI's own retry layer already handles 429/5xx/connection errors and needs to see 429s promptly to pause other batches; max 5) */
+  sdkMaxRetries?: number;
+  /** Halve concurrency after repeated rate limits and ramp back on success (default true) */
+  adaptiveConcurrency?: boolean;
+  /** Abort the run on the first failed batch instead of continuing and reporting (default false) */
+  failFast?: boolean;
 }
 
 /**

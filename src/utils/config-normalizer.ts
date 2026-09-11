@@ -38,6 +38,23 @@ export function normalizeConfig(config: AppConfig): AppConfig {
     normalized.resumeMode = 'auto';
   }
 
+  // Set rate-limit defaults
+  if (normalized.rateLimitMaxRetries === undefined) {
+    normalized.rateLimitMaxRetries = 6;
+  }
+  if (normalized.rateLimitMaxWaitMs === undefined) {
+    normalized.rateLimitMaxWaitMs = 90000;
+  }
+  if (normalized.sdkMaxRetries === undefined) {
+    normalized.sdkMaxRetries = 0;
+  }
+  if (normalized.adaptiveConcurrency === undefined) {
+    normalized.adaptiveConcurrency = true;
+  }
+  if (normalized.failFast === undefined) {
+    normalized.failFast = false;
+  }
+
   return normalized;
 }
 
@@ -112,6 +129,32 @@ export function validateConfig(config: AppConfig): void {
   // Validate temperature
   if (config.temperature !== undefined && (config.temperature < 0 || config.temperature > 2)) {
     errors.push(`temperature must be between 0 and 2, got ${config.temperature}`);
+  }
+
+  // Validate rateLimitMaxRetries
+  if (
+    config.rateLimitMaxRetries !== undefined &&
+    (config.rateLimitMaxRetries < 0 || config.rateLimitMaxRetries > 20)
+  ) {
+    errors.push(`rateLimitMaxRetries must be between 0 and 20, got ${config.rateLimitMaxRetries}`);
+  }
+
+  // Validate rateLimitMaxWaitMs
+  if (
+    config.rateLimitMaxWaitMs !== undefined &&
+    (config.rateLimitMaxWaitMs < 1000 || config.rateLimitMaxWaitMs > 600000)
+  ) {
+    errors.push(
+      `rateLimitMaxWaitMs must be between 1000 and 600000, got ${config.rateLimitMaxWaitMs}`
+    );
+  }
+
+  // Validate sdkMaxRetries
+  if (
+    config.sdkMaxRetries !== undefined &&
+    (config.sdkMaxRetries < 0 || config.sdkMaxRetries > 5)
+  ) {
+    errors.push(`sdkMaxRetries must be between 0 and 5, got ${config.sdkMaxRetries}`);
   }
 
   if (errors.length > 0) {

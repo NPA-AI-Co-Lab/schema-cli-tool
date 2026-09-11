@@ -27,6 +27,12 @@ export interface DecodeResultsArgs {
  */
 export interface ProcessBatchArgs {
   llmClient?: ILLMClient;
+  /**
+   * Lazy accessor for the LLM client. Preferred over `llmClient` — it is only invoked
+   * when a batch actually needs the LLM (i.e. `canSkipLLM()` is false), so runs that
+   * resolve every field deterministically never require an LLM client (or API key).
+   */
+  getLlmClient?: () => ILLMClient;
   instructions: string;
   zodSchema: ZodTypeAny;
   batchLength: number;
@@ -241,6 +247,7 @@ export async function validateResults(
 export async function processBatch(args: ProcessBatchArgs): Promise<Record<string, unknown>[]> {
   const {
     llmClient,
+    getLlmClient,
     instructions,
     zodSchema,
     batchLength,
@@ -265,10 +272,20 @@ export async function processBatch(args: ProcessBatchArgs): Promise<Record<strin
   if (useDeterministicOnly && prefills) {
     rawOutput = buildDeterministicOutput(prefills);
   } else {
-    if (!llmClient) {
+    // Resolve the client lazily: a deterministic-only run never reaches this branch,
+    // so it never needs an LLM client (or an API key) to be configured.
+    const resolvedClient = llmClient ?? getLlmClient?.();
+    if (!resolvedClient) {
       throw new Error('LLM client is not configured');
     }
-    rawOutput = await fetchAnalysis(llmClient, instructions, input, model, zodSchema, temperature);
+    rawOutput = await fetchAnalysis(
+      resolvedClient,
+      instructions,
+      input,
+      model,
+      zodSchema,
+      temperature
+    );
   }
 
   // Decode PII if needed

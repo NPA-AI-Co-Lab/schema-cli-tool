@@ -1,6 +1,8 @@
 export {
   loadEnvConfig,
   loadAppConfig,
+  loadBaseAppConfig,
+  getDefaultAppConfig,
   loadGlobalConfig,
   getBatchSize,
   getConcurrencySize,
